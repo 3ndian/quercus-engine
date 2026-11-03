@@ -58,12 +58,12 @@ use quercus_core::videoparams::VideoParams;
 use quercus_node::footage::FootageBehavior;
 use quercus_node::sequence::SequenceBehavior;
 use quercus_node::track::{TrackBehavior, TrackListBehavior, TrackType};
-use quercus_render::procpool::{bgra8_to_f32_rgba, DispatcherConfig, ProcessDispatcher, ShmFrameRef};
+use quercus_render::procpool::{bgra8_to_f32_rgba, ShmFrameRef};
+use quercus_render::worker::{InlineDispatcher, JobDispatch};
 use quercus_render::ticket::{
 	ticket_kind, AudioTicketParams, MontageAudio, MontageClip, MontageEffect, TicketArena,
 	TicketId, TicketPayload, TicketResult, VideoTicketParams,
 };
-use quercus_render::worker::JobDispatch;
 
 use crate::error::{Error, Result};
 use crate::nodeops::{find_input_footage, pixel_format_from_code, NodeRef, ProjectRef};
@@ -899,39 +899,27 @@ impl RenderTask {
 		// manager is initialized, otherwise a private process dispatcher +
 		// arena owned by this run (keeps headless/test runs
 		// self-contained; M15 S2 — the in-process thread pool is gone).
-		let (arena, mut private_dispatch) = match quercus_render::manager::RenderManager::global() {
-			Some(manager) => (manager.tickets.clone(), None),
+		// Zero-copy in-process rendering: the ticket producer runs on the
+		// caller's render thread and returns the frame directly; there is
+		// no worker process or shared-memory staging on this path.
+		let arena = match quercus_render::manager::RenderManager::global() {
+			Some(manager) => manager.tickets.clone(),
 			None => {
-				let dispatcher = ProcessDispatcher::new(DispatcherConfig::default())
-					.map_err(|e| Error::Failed(format!("render worker pool: {e}")))?;
-				dispatcher
-					.start()
-					.map_err(|e| Error::Failed(format!("render worker pool start: {e}")))?;
+				let dispatcher: Arc<dyn JobDispatch> = InlineDispatcher::sync();
 				let producer: quercus_render::ticket::Producer = Arc::new(|time, params| {
 					quercus_render::eval::render_produced_frame(time, params).map(TicketPayload::Video)
 				});
-				// M15 S3: the private dispatcher routes audio through the
-				// worker pool too; the inline dispatcher is the fallback
-				// when the dispatcher refuses a job (oversized audio ranges
-				// / teardown).
-				let inline = quercus_render::worker::InlineDispatcher::sync();
-				let arena = Arc::new(TicketArena::new_with_audio_fallback(
+				Arc::new(TicketArena::new_with_audio_fallback(
 					dispatcher.clone(),
 					dispatcher.clone(),
-					Some(inline),
+					Some(dispatcher),
 					producer,
-				));
-				(arena, Some(dispatcher))
+				))
 			}
 		};
-		// M15 S2: the process dispatcher delivers completions from its poll
-		// loop; the render thread must pump it while it waits (there is no
-		// UI tick on the export thread).
 		let pump = || {
 			if let Some(m) = quercus_render::manager::RenderManager::global() {
 				m.poll();
-			} else if let Some(d) = &private_dispatch {
-				d.poll();
 			}
 		};
 
@@ -1059,8 +1047,6 @@ impl RenderTask {
 							}
 							if let Some(m) = quercus_render::manager::RenderManager::global() {
 								m.release_audio_frame(&audio);
-							} else if let Some(d) = &private_dispatch {
-								d.release_audio_frame(&audio);
 							}
 						}
 						Ok(_) => {
@@ -1100,8 +1086,6 @@ impl RenderTask {
 							}
 							if let Some(m) = quercus_render::manager::RenderManager::global() {
 								m.release_frame(&frame);
-							} else if let Some(d) = &private_dispatch {
-								d.release_frame(&frame);
 							}
 							if self.native_progress_signalling {
 								progress_counter += 1.0;
@@ -1208,13 +1192,6 @@ impl RenderTask {
 		unsafe {
 			drop(Box::from_raw(dispatch));
 		}
-		// `pump`'s shared borrow of `private_dispatch` ends at its last use
-		// above (NLL); the closure needs no explicit drop, which would be a
-		// no-op because a closure capture is `Copy` here.
-		if let Some(d) = private_dispatch.take() {
-			d.shutdown();
-		}
-
 		result
 	}
 
