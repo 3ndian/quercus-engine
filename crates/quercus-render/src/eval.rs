@@ -2607,6 +2607,144 @@ pub fn audio_samples_byte_len(params: &crate::ticket::AudioTicketParams) -> Resu
         .saturating_mul(4))
 }
 
+/// Apply one clip's audio parameters to a decoded interleaved chunk.
+///
+/// Order (audio-post Phase 1): per-frame gain, constant-power stereo pan
+/// (-3 dB at centre), linear fade-in/fade-out anchored at the clip's
+/// timeline in/out, then the clip's audio effect chain in source-first
+/// order. `first_time` is the absolute sequence time (seconds) of frame 0;
+/// `channels` is the output channel count. Pan affects the first two
+/// channels only (mono output is unpanned; extra channels only get the
+/// gain/fade/effects).
+fn process_clip_audio(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    clip: &crate::ticket::MontageClip,
+    first_time: f64,
+    rate: i32,
+) {
+    let channels = channels.max(1);
+    let rate = rate.max(1) as f64;
+    let gain = clip.gain as f64;
+    let pan = clip.pan.clamp(-1.0, 1.0) as f64;
+    // Constant-power pan law: centre (0) is -3 dB on both channels,
+    // hard left/right isolate one channel.
+    let theta = (pan + 1.0) * std::f64::consts::FRAC_PI_4;
+    let (left_pan, right_pan) = (theta.cos(), theta.sin());
+    let in_time = clip.in_time.to_f64();
+    let out_time = clip.out_time.to_f64();
+    let fade_in = clip.fade_in.to_f64();
+    let fade_out = clip.fade_out.to_f64();
+    let fade_in = if fade_in.is_finite() && fade_in > 0.0 {
+        fade_in
+    } else {
+        0.0
+    };
+    let fade_out = if fade_out.is_finite() && fade_out > 0.0 {
+        fade_out
+    } else {
+        0.0
+    };
+
+    for frame in 0..frames {
+        let t = first_time + frame as f64 / rate;
+        let mut factor = gain;
+        if fade_in > 0.0 {
+            factor *= ((t - in_time) / fade_in).clamp(0.0, 1.0);
+        }
+        if fade_out > 0.0 {
+            factor *= ((out_time - t) / fade_out).clamp(0.0, 1.0);
+        }
+        let base = frame * channels;
+        if channels >= 2 {
+            buf[base] *= (factor * left_pan) as f32;
+            buf[base + 1] *= (factor * right_pan) as f32;
+            for channel in 2..channels {
+                buf[base + channel] *= factor as f32;
+            }
+        } else {
+            buf[base] *= factor as f32;
+        }
+    }
+
+    for effect in &clip.audio_effects {
+        apply_audio_effect(buf, frames, channels, effect, rate);
+    }
+}
+
+/// Apply one built-in audio effect to an interleaved chunk by driving the
+/// existing node behavior (`VolumeNode`/`PanNode`) through the factory:
+/// the mixer uses the same `process_samples` kernels as the node graph
+/// instead of re-implementing them. Disabled effects are bypassed; an
+/// unknown type id passes the chunk through with a one-shot warning.
+fn apply_audio_effect(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    effect: &crate::ticket::MontageAudioEffect,
+    rate: f64,
+) {
+    if !effect.enabled {
+        return;
+    }
+    let (param_input, default) = match effect.type_id.as_str() {
+        quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID => {
+            (quercus_node::block::AUDIO_VOLUME_INPUT, 1.0)
+        }
+        quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID => {
+            (quercus_node::block::AUDIO_PAN_INPUT, 0.0)
+        }
+        other => {
+            warn_unsupported_once(
+                other,
+                "not a built-in audio effect (only Volume and Pan are wired)",
+            );
+            return;
+        }
+    };
+    let Some((core, behavior)) =
+        quercus_node::factory::Factory::global().create_any(&effect.type_id)
+    else {
+        warn_unsupported_once(&effect.type_id, "no node factory entry");
+        return;
+    };
+    let value = effect
+        .param(param_input)
+        .map(|value| value.to_double())
+        .unwrap_or(default);
+
+    // Interleaved f32 -> planar F32 SampleBuffer for the node kernel.
+    let mut input = quercus_node::value::SampleBuffer {
+        format: quercus_core::SampleFormat::F32Planar,
+        channels,
+        sample_count: frames,
+        data: vec![0u8; channels * frames * 4],
+    };
+    for channel in 0..channels {
+        for frame in 0..frames {
+            input.set_sample_value(channel, frame, buf[frame * channels + channel] as f64);
+        }
+    }
+    let mut output = input.clone();
+    let mut inputs = NodeValueRow::new();
+    inputs.insert(
+        "samples_in".to_string(),
+        NodeValue::Samples(input),
+    );
+    inputs.insert(param_input.to_string(), NodeValue::Float(value));
+    let range = TimeRange::new(
+        Rational::new(0, 1),
+        quercus_core::Rational::from_double(frames as f64 / rate.max(1.0)),
+    );
+    behavior.process_samples(&core, &inputs, range, &mut output);
+    for channel in 0..channels {
+        for frame in 0..frames {
+            buf[frame * channels + channel] = output.sample_value(channel, frame) as f32;
+        }
+    }
+}
+
 /// Mix the audio montage into `acc` (`total_frames * channels` samples,
 /// zero-initialized by the caller). Shared by the heap
 /// [`render_audio_samples`] and the shm-slot [`render_audio_samples_into`]
@@ -2652,9 +2790,21 @@ fn mix_audio_montage(
             RetrieveAudioStatus::Success => frames,
             _ => 0,
         };
-        // Mix into the accumulator (per-channel gain).
+        // Gain, constant-power pan, clip fades and the audio effect chain
+        // all run through the shared per-clip processor. The first decoded
+        // frame sits at the rounded absolute sequence time.
+        let first_time = params.range.in_().to_f64() + start_frame as f64 / rate as f64;
+        process_clip_audio(
+            &mut buf,
+            written,
+            channels as usize,
+            clip,
+            first_time,
+            rate,
+        );
+        // Mix into the accumulator.
         for i in 0..written * channels as usize {
-            acc[start_frame * channels as usize + i] += buf[i] * clip.gain;
+            acc[start_frame * channels as usize + i] += buf[i];
         }
     }
     // Clamp to [-1, 1]: overlapping clips sum linearly and can exceed
@@ -3778,7 +3928,11 @@ mod tests {
             out_time: Rational::new(1, 1),
             media_in: Rational::new(0, 1),
             gain: 1.0,
+            pan: 0.0,
+            fade_in: Rational::new(0, 1),
+            fade_out: Rational::new(0, 1),
             effects,
+            audio_effects: Vec::new(),
         }
     }
 
@@ -5192,7 +5346,11 @@ mod tests {
             out_time: out,
             media_in: Rational::new(0, 1),
             gain: 1.0,
+            pan: 0.0,
+            fade_in: Rational::new(0, 1),
+            fade_out: Rational::new(0, 1),
             effects: Vec::new(),
+            audio_effects: Vec::new(),
         };
         params.montage = vec![
             // No overlap at all.
@@ -5205,6 +5363,247 @@ mod tests {
         let mut acc = vec![0.0f32; 1000 * 2];
         mix_audio_montage(&params, 48000, 2, 1000, &mut acc).expect("skips");
         assert!(acc.iter().all(|&v| v == 0.0), "uncovered range stays silent");
+    }
+
+    // ---- Per-clip audio processing (Phase 1 audio post) ------------------
+
+    fn audio_test_clip(
+        gain: f32,
+        pan: f32,
+        fade_in: Rational,
+        fade_out: Rational,
+        audio_effects: Vec<crate::ticket::MontageAudioEffect>,
+    ) -> crate::ticket::MontageClip {
+        crate::ticket::MontageClip {
+            filename: String::new(),
+            stream_index: 0,
+            in_time: Rational::new(0, 1),
+            out_time: Rational::new(1, 1),
+            media_in: Rational::new(0, 1),
+            gain,
+            pan,
+            fade_in,
+            fade_out,
+            effects: Vec::new(),
+            audio_effects,
+        }
+    }
+
+    fn volume_effect(value: f64) -> crate::ticket::MontageAudioEffect {
+        crate::ticket::MontageAudioEffect {
+            type_id: quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID.to_string(),
+            enabled: true,
+            params: vec![(
+                quercus_node::block::AUDIO_VOLUME_INPUT.to_string(),
+                NodeValue::Float(value),
+            )],
+        }
+    }
+
+    fn pan_effect(value: f64) -> crate::ticket::MontageAudioEffect {
+        crate::ticket::MontageAudioEffect {
+            type_id: quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID.to_string(),
+            enabled: true,
+            params: vec![(
+                quercus_node::block::AUDIO_PAN_INPUT.to_string(),
+                NodeValue::Float(value),
+            )],
+        }
+    }
+
+    fn run_clip_audio(
+        buf: &mut [f32],
+        channels: usize,
+        clip: &crate::ticket::MontageClip,
+        first_time: f64,
+        rate: i32,
+    ) {
+        let frames = buf.len() / channels;
+        process_clip_audio(buf, frames, channels, clip, first_time, rate);
+    }
+
+    /// Gain 1.0 at pan centre uses the constant-power law: both stereo
+    /// channels land at 0.7071 (-3 dB).
+    #[test]
+    fn clip_gain_at_pan_centre_is_minus_three_db() {
+        let clip = audio_test_clip(1.0, 0.0, Rational::new(0, 1), Rational::new(0, 1), Vec::new());
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        for sample in buf {
+            assert!(
+                (sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+                "centre pan is -3 dB, got {sample}"
+            );
+        }
+
+        // Gain is applied on top of the pan law.
+        let clip = audio_test_clip(0.5, 0.0, Rational::new(0, 1), Rational::new(0, 1), Vec::new());
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        for sample in buf {
+            assert!(
+                (sample - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+                "gain multiplies the pan law, got {sample}"
+            );
+        }
+    }
+
+    /// Hard left/right isolate one channel.
+    #[test]
+    fn clip_pan_isolates_the_opposite_channel() {
+        let left = audio_test_clip(1.0, -1.0, Rational::new(0, 1), Rational::new(0, 1), Vec::new());
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &left, 0.0, 48000);
+        assert!((buf[0] - 1.0).abs() < 1e-6, "left stays at unity");
+        assert!(buf[1].abs() < 1e-6, "hard-left silences the right channel");
+
+        let right = audio_test_clip(1.0, 1.0, Rational::new(0, 1), Rational::new(0, 1), Vec::new());
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &right, 0.0, 48000);
+        assert!(buf[0].abs() < 1e-6, "hard-right silences the left channel");
+        assert!((buf[1] - 1.0).abs() < 1e-6, "right stays at unity");
+    }
+
+    /// Linear fades are anchored at the clip's timeline in/out (not at the
+    /// decoded chunk's own edges).
+    #[test]
+    fn clip_fades_follow_the_clip_bounds() {
+        // Fade-in over the whole 1 s clip, mono: t = 0, .25, .5, .75 s.
+        let clip = audio_test_clip(1.0, 0.0, Rational::new(1, 1), Rational::new(0, 1), Vec::new());
+        let mut buf = vec![1.0f32; 4];
+        run_clip_audio(&mut buf, 1, &clip, 0.0, 4);
+        for (i, sample) in buf.iter().enumerate() {
+            assert!(
+                (*sample - i as f32 / 4.0).abs() < 1e-6,
+                "fade-in frame {i}: {sample}"
+            );
+        }
+
+        // Fade-out over the whole 1 s clip: t = 0, .25, .5, .75, 1.0 s.
+        let clip = audio_test_clip(1.0, 0.0, Rational::new(0, 1), Rational::new(1, 1), Vec::new());
+        let mut buf = vec![1.0f32; 5];
+        run_clip_audio(&mut buf, 1, &clip, 0.0, 4);
+        for (i, sample) in buf.iter().enumerate() {
+            assert!(
+                (*sample - (1.0 - i as f32 / 4.0)).abs() < 1e-6,
+                "fade-out frame {i}: {sample}"
+            );
+        }
+
+        // A fade that started before the rendered chunk is evaluated
+        // against absolute time: the chunk begins 0.5 s into a 1 s fade.
+        let clip = audio_test_clip(1.0, 0.0, Rational::new(1, 1), Rational::new(0, 1), Vec::new());
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 1, &clip, 0.5, 4);
+        assert!((buf[0] - 0.5).abs() < 1e-6);
+        assert!((buf[1] - 0.75).abs() < 1e-6);
+    }
+
+    /// The chain applies Volume then Pan in the stored order. (Both are
+    /// channel-diagonal linear kernels, so they commute numerically; the
+    /// test pins the combined result and the chain order is covered by the
+    /// montage propagation tests.)
+    #[test]
+    fn clip_audio_effects_apply_volume_then_pan() {
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![volume_effect(0.5), pan_effect(0.5)],
+        );
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        // Centre base pan 0.7071, Volume 0.5 (both), Pan +0.5 halves left.
+        assert!((buf[0] - 0.5 * 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!((buf[1] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+
+        // Swapping the entries still applies both (the kernels commute).
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![pan_effect(0.5), volume_effect(0.5)],
+        );
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        assert!((buf[0] - 0.5 * 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!((buf[1] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+    }
+
+    /// Disabled effects are bypassed and an unknown type id passes the
+    /// samples through (warning once, never a panic or a dropped clip).
+    #[test]
+    fn clip_audio_effects_bypass_disabled_and_unknown() {
+        let mut disabled = volume_effect(0.0);
+        disabled.enabled = false;
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![disabled],
+        );
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        for sample in &buf {
+            assert!((*sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        }
+
+        let unknown = crate::ticket::MontageAudioEffect {
+            type_id: "com.example.unknown-audio".into(),
+            enabled: true,
+            params: Vec::new(),
+        };
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![unknown, volume_effect(0.5)],
+        );
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        for sample in &buf {
+            assert!(
+                (*sample - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+                "unknown effect passes through, later effects still run"
+            );
+        }
+        // Warms / reuses the one-shot warning path (must not panic).
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+    }
+
+    /// Missing effect parameters fall back to the node defaults (Volume
+    /// unity, Pan centre).
+    #[test]
+    fn clip_audio_effect_defaults_when_params_are_missing() {
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![
+                crate::ticket::MontageAudioEffect {
+                    type_id: quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID.into(),
+                    enabled: true,
+                    params: Vec::new(),
+                },
+                crate::ticket::MontageAudioEffect {
+                    type_id: quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID.into(),
+                    enabled: true,
+                    params: Vec::new(),
+                },
+            ],
+        );
+        let mut buf = vec![1.0f32; 2];
+        run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
+        // Volume 1.0 leaves the -3 dB centre; Pan 0.0 leaves the buffer
+        // untouched in the node kernel.
+        for sample in &buf {
+            assert!((*sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -5390,7 +5789,11 @@ mod tests {
                 out_time: Rational::new(2, 1),
                 media_in: Rational::new(0, 1),
                 gain: 1.0,
+                pan: 0.0,
+                fade_in: Rational::new(0, 1),
+                fade_out: Rational::new(0, 1),
                 effects: Vec::new(),
+                audio_effects: Vec::new(),
             }],
             adjustments: Vec::new(),
         };
@@ -6387,7 +6790,11 @@ mod tests {
                 out_time: Rational::new(2, 1),
                 media_in: Rational::new(0, 1),
                 gain: 1.0,
+                pan: 0.0,
+                fade_in: Rational::new(0, 1),
+                fade_out: Rational::new(0, 1),
                 effects: vec![unknown_effect(effect_type_id)],
+                audio_effects: Vec::new(),
             }],
             adjustments: Vec::new(),
         }

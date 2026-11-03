@@ -1335,7 +1335,11 @@ mod tests {
 				out_time: out_t,
 				media_in,
 				gain: 1.0,
+				pan: 0.0,
+				fade_in: Rational::new(0, 1),
+				fade_out: Rational::new(0, 1),
 				effects: Vec::new(),
+				audio_effects: Vec::new(),
 			}
 		};
 		let params = crate::ticket::VideoTicketParams {

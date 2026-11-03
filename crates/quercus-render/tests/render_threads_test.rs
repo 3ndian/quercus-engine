@@ -151,7 +151,11 @@ fn montage_params(filename: &Path, time: Rational) -> VideoTicketParams {
 			out_time: Rational::new(1, 1),
 			media_in: Rational::new(0, 1),
 			gain: 1.0,
+			pan: 0.0,
+			fade_in: Rational::new(0, 1),
+			fade_out: Rational::new(0, 1),
 			effects: Vec::new(),
+			audio_effects: Vec::new(),
 		}],
 		..base_params(time)
 	}

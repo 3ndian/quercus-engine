@@ -24,6 +24,66 @@ use crate::input::Input;
 use crate::node::{Category, NodeBehavior, NodeCore};
 use crate::value::{NodeValue, NodeValueRow, NodeValueTable, ValueType};
 
+/// Volume effect type id (matches `nodes::volume::VolumeNode::type_id`).
+pub const AUDIO_EFFECT_VOLUME_TYPE_ID: &str = "org.olivevideoeditor.Olive.volume";
+
+/// Pan effect type id (matches `nodes::pan::PanNode::type_id`).
+pub const AUDIO_EFFECT_PAN_TYPE_ID: &str = "org.olivevideoeditor.Olive.pan";
+
+/// Volume effect parameter input id (`volume_in`).
+pub const AUDIO_VOLUME_INPUT: &str = "volume_in";
+
+/// Pan effect parameter input id (`panning_in`).
+pub const AUDIO_PAN_INPUT: &str = "panning_in";
+
+/// One entry of a clip's audio effect chain.
+///
+/// The chain lives on the clip (rather than being resolved from graph
+/// connections) so that the montage builder, the mixer and the C ABI all
+/// see the same ordered list. Only built-in float-parameter effects are
+/// represented in Phase 1 (`Volume`, `Pan`); an unknown `type_id` is
+/// carried through and skipped with a one-shot render warning. Dynamic
+/// parameters (keyframes) and graph-attached OFX audio effects remain a
+/// Phase-2 follow-up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipAudioEffect {
+	/// Effect type id (`org.olivevideoeditor.Olive.volume` / `.pan`).
+	pub type_id: String,
+	/// Disabled effects are bypassed by the mixer.
+	pub enabled: bool,
+	/// Static parameter values keyed by the node input id.
+	pub params: Vec<(String, NodeValue)>,
+}
+
+impl ClipAudioEffect {
+	/// New enabled effect with no explicit parameters (the node defaults
+	/// apply: Volume 1.0, Pan 0.0).
+	pub fn new(type_id: impl Into<String>) -> Self {
+		ClipAudioEffect {
+			type_id: type_id.into(),
+			enabled: true,
+			params: Vec::new(),
+		}
+	}
+
+	/// The static value of `input`, if the effect carries one.
+	pub fn param(&self, input: &str) -> Option<&NodeValue> {
+		self.params
+			.iter()
+			.find(|(id, _)| id == input)
+			.map(|(_, value)| value)
+	}
+
+	/// Set (or replace) a static parameter value.
+	pub fn set_param(&mut self, input: &str, value: NodeValue) {
+		if let Some((_, existing)) = self.params.iter_mut().find(|(id, _)| id == input) {
+			*existing = value;
+		} else {
+			self.params.push((input.to_string(), value));
+		}
+	}
+}
+
 /// Block core data (C++ `Block` members): timeline span + media range.
 #[derive(Clone)]
 pub struct BlockCore {
@@ -47,6 +107,17 @@ pub struct BlockCore {
 	pub track: Option<NodeId>,
 	/// Per-clip audio gain (1.0 = unity).
 	pub audio_gain: f64,
+	/// Per-clip stereo pan (-1 = hard left, 0 = centre, 1 = hard right).
+	/// The mixer uses the constant-power (equal-power) law, so centre is
+	/// -3 dB on both channels rather than unity.
+	pub audio_pan: f64,
+	/// Linear fade-in duration anchored at the clip's timeline in-point.
+	pub audio_fade_in: Rational,
+	/// Linear fade-out duration anchored at the clip's timeline out-point.
+	pub audio_fade_out: Rational,
+	/// Ordered audio effect chain (source-first; applied after gain/pan/
+	/// fade by the mixer).
+	pub audio_effects: Vec<ClipAudioEffect>,
 }
 
 impl Default for BlockCore {
@@ -62,6 +133,10 @@ impl Default for BlockCore {
 			loop_mode: 0,
 			track: None,
 			audio_gain: 1.0,
+			audio_pan: 0.0,
+			audio_fade_in: Rational::new(0, 1),
+			audio_fade_out: Rational::new(0, 1),
+			audio_effects: Vec::new(),
 		}
 	}
 }
@@ -202,6 +277,32 @@ pub mod adjustment_input {
 	pub const TEXTURE_INPUT: &str = "tex_in";
 }
 
+/// Serialize one audio-effect parameter as `(type tag, text value)`.
+/// Phase 1 effects use float parameters; the other plain-data forms are
+/// carried so a future effect model does not need a file-format break.
+fn audio_param_to_text(value: &NodeValue) -> (&'static str, String) {
+	match value {
+		NodeValue::Int(v) => ("int", v.to_string()),
+		NodeValue::Float(v) => ("float", v.to_string()),
+		NodeValue::Boolean(v) => ("bool", if *v { "1" } else { "0" }.to_string()),
+		NodeValue::Text(v) => ("text", v.clone()),
+		NodeValue::Rational(v) => ("rational", v.to_display_string()),
+		_ => ("float", value.to_double().to_string()),
+	}
+}
+
+/// Parse a serialized audio-effect parameter. Unknown tags degrade to a
+/// float so an older reader never fails the whole project load.
+fn audio_param_from_text(kind: &str, text: &str) -> NodeValue {
+	match kind {
+		"int" => NodeValue::Int(text.trim().parse().unwrap_or(0)),
+		"bool" => NodeValue::Boolean(text.trim() == "1" || text.trim() == "true"),
+		"text" => NodeValue::Text(text.to_string()),
+		"rational" => NodeValue::Rational(Rational::from_string(text)),
+		_ => NodeValue::Float(text.trim().parse().unwrap_or(0.0)),
+	}
+}
+
 /// Save the shared [`BlockCore`] custom fields (C++ persists the
 /// timeline span through the `length_in` input and the track's block
 /// order; the Rust model owns the range directly, so the custom
@@ -221,8 +322,60 @@ fn save_block_core(writer: &mut dyn crate::serializer::XmlWrite, core: &BlockCor
 	);
 	writer.text_element("loop_mode", &core.loop_mode.to_string());
 	writer.text_element("audio_gain", &core.audio_gain.to_string());
+	writer.text_element("audio_pan", &core.audio_pan.to_string());
+	writer.text_element("audio_fade_in", &core.audio_fade_in.to_display_string());
+	writer.text_element("audio_fade_out", &core.audio_fade_out.to_display_string());
+	if !core.audio_effects.is_empty() {
+		writer.start_element("audio_effects");
+		for effect in &core.audio_effects {
+			writer.start_element("audio_effect");
+			writer.attribute("type_id", &effect.type_id);
+			writer.attribute("enabled", if effect.enabled { "1" } else { "0" });
+			for (input, value) in &effect.params {
+				let (kind, text) = audio_param_to_text(value);
+				writer.start_element("param");
+				writer.attribute("input", input);
+				writer.attribute("type", kind);
+				writer.characters(&text);
+				writer.end_element(); // param
+			}
+			writer.end_element(); // audio_effect
+		}
+		writer.end_element(); // audio_effects
+	}
 	if let Some(t) = core.track {
 		writer.text_element("track", &t.identity().to_string());
+	}
+}
+
+/// Parse one `<audio_effect>` child list (the reader is positioned at
+/// `<audio_effects>`). Uses the same nested-element walk as the other
+/// custom segments: unknown children are skipped, never fatal.
+fn load_audio_effects(reader: &mut dyn crate::serializer::XmlRead, core: &mut BlockCore) {
+	core.audio_effects.clear();
+	while reader.next_start_element() {
+		if reader.name() != "audio_effect" {
+			reader.skip_current_element();
+			continue;
+		}
+		let mut effect = ClipAudioEffect::new(reader.attribute("type_id").unwrap_or_default());
+		effect.enabled = reader
+			.attribute("enabled")
+			.map(|v| v != "0")
+			.unwrap_or(true);
+		while reader.next_start_element() {
+			if reader.name() != "param" {
+				reader.skip_current_element();
+				continue;
+			}
+			let input = reader.attribute("input").unwrap_or_default();
+			let kind = reader.attribute("type").unwrap_or_else(|| "float".into());
+			let text = reader.read_element_text();
+			if !input.is_empty() {
+				effect.params.push((input, audio_param_from_text(&kind, &text)));
+			}
+		}
+		core.audio_effects.push(effect);
 	}
 }
 
@@ -271,6 +424,20 @@ fn load_block_core(
 					.parse()
 					.unwrap_or(core.audio_gain)
 			}
+			"audio_pan" => {
+				core.audio_pan = reader
+					.read_element_text()
+					.trim()
+					.parse()
+					.unwrap_or(core.audio_pan)
+			}
+			"audio_fade_in" => {
+				core.audio_fade_in = Rational::from_string(&reader.read_element_text())
+			}
+			"audio_fade_out" => {
+				core.audio_fade_out = Rational::from_string(&reader.read_element_text())
+			}
+			"audio_effects" => load_audio_effects(reader, core),
 			"track" => core.track = crate::serializer::parse_node_ref(&reader.read_element_text()),
 			_ => {
 				if !extra(&name, reader) {
@@ -776,6 +943,7 @@ pub fn adjustment_create() -> (NodeCore, Box<dyn NodeBehavior>) {
 mod tests {
 	use super::*;
 	use crate::project::Project;
+	use crate::serializer::{XmlRead, XmlWrite};
 
 	/// The clip's `tex_in` is declared as a connectable, non-keyframable
 	/// texture input and is the node's effect input (C++ ClipBlock
@@ -1001,5 +1169,65 @@ mod tests {
 			&mut table,
 		);
 		assert_eq!(table.count(), 0, "unconnected adjustment emits nothing");
+	}
+
+	/// The clip's audio fields (gain/pan/fade/effect chain) ride the
+	/// `<custom>` block segment and load back losslessly.
+	#[test]
+	fn block_audio_fields_roundtrip() {
+		let mut core = BlockCore::default();
+		core.audio_gain = 0.5;
+		core.audio_pan = -0.25;
+		core.audio_fade_in = Rational::new(1, 2);
+		core.audio_fade_out = Rational::new(3, 4);
+		let mut volume = ClipAudioEffect::new(AUDIO_EFFECT_VOLUME_TYPE_ID);
+		volume.set_param(AUDIO_VOLUME_INPUT, NodeValue::Float(0.5));
+		let mut pan = ClipAudioEffect::new(AUDIO_EFFECT_PAN_TYPE_ID);
+		pan.enabled = false;
+		pan.set_param(AUDIO_PAN_INPUT, NodeValue::Float(0.25));
+		core.audio_effects = vec![volume, pan];
+
+		let mut writer = crate::serializer::XmlWriterBridge::new().unwrap();
+		writer.start_element("custom");
+		save_block_core(&mut writer, &core);
+		writer.end_element();
+		let xml = writer.output();
+		assert!(xml.contains("<audio_pan>-0.25</audio_pan>"));
+		assert!(xml.contains("<audio_fade_in>1/2</audio_fade_in>"));
+		assert!(xml.contains("type_id=\"org.olivevideoeditor.Olive.pan\""));
+
+		let mut reader = crate::serializer::XmlReaderBridge::new(&xml).unwrap();
+		assert!(reader.next_start_element());
+		let mut loaded = BlockCore::default();
+		load_block_core(&mut reader, &mut loaded, &mut |_, _| false);
+		assert_eq!(loaded.audio_gain, core.audio_gain);
+		assert_eq!(loaded.audio_pan, core.audio_pan);
+		assert_eq!(loaded.audio_fade_in, core.audio_fade_in);
+		assert_eq!(loaded.audio_fade_out, core.audio_fade_out);
+		assert_eq!(loaded.audio_effects, core.audio_effects);
+	}
+
+	/// A pre-existing clip segment without the new audio elements keeps
+	/// the values already on the core (old projects open with the
+	/// defaults; the load is an overlay, not a reset).
+	#[test]
+	fn block_audio_fields_keep_defaults_for_old_files() {
+		let xml = "<custom><range in=\"0/1\" out=\"1/1\"/><media_in>0/1</media_in>\
+			<speed>1</speed><reversed>0</reversed><enabled>1</enabled>\
+			<maintain_audio_pitch>0</maintain_audio_pitch><loop_mode>0</loop_mode>\
+			<audio_gain>1</audio_gain></custom>";
+		let mut reader = crate::serializer::XmlReaderBridge::new(xml).unwrap();
+		assert!(reader.next_start_element());
+		let mut loaded = BlockCore::default();
+		loaded.audio_pan = 0.75;
+		loaded.audio_fade_in = Rational::new(3, 1);
+		loaded.audio_effects.push(ClipAudioEffect::new("stale"));
+		load_block_core(&mut reader, &mut loaded, &mut |_, _| false);
+		// Elements absent from the file leave the incoming defaults alone
+		// (a fresh BlockCore has pan 0, fades 0, empty chain).
+		assert_eq!(loaded.audio_gain, 1.0);
+		assert_eq!(loaded.audio_pan, 0.75);
+		assert_eq!(loaded.audio_fade_in, Rational::new(3, 1));
+		assert_eq!(loaded.audio_effects.len(), 1);
 	}
 }

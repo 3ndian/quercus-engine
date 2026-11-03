@@ -730,6 +730,133 @@ pub unsafe extern "C" fn quercus_editor_create_sequence(
 	id
 }
 
+/// Extract the `(project, clip)` pair shared by the clip audio setters.
+unsafe fn editor_audio_clip(
+	session: *const EditorSessionHandle,
+	clip: u64,
+) -> Option<(std::sync::Arc<std::sync::Mutex<Project>>, NodeId)> {
+	let session = unsafe { session.as_ref() }?;
+	let clip = NodeId::from_identity(clip)?;
+	Some((session.project(), clip))
+}
+
+/// Sets a clip's stereo pan (-1 = hard left, 1 = hard right, 0 = centre)
+/// as one undo entry. Returns false on a null/invalid session, clip or pan.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_set_clip_pan(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	pan: f64,
+) -> bool {
+	let Some((project, clip)) = (unsafe { editor_audio_clip(session, clip) }) else {
+		return false;
+	};
+	crate::editor_commands::set_clip_pan(&project, clip, pan).is_ok()
+}
+
+/// Sets a clip's linear fade-in/fade-out durations (timeline seconds as
+/// rational num/den pairs) as one undo entry. A zero denominator is
+/// invalid. Returns false for a null/invalid session, clip or fade.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_set_clip_fade(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	fade_in_num: i64,
+	fade_in_den: i64,
+	fade_out_num: i64,
+	fade_out_den: i64,
+) -> bool {
+	let Some((project, clip)) = (unsafe { editor_audio_clip(session, clip) }) else {
+		return false;
+	};
+	let fade_in = quercus_core::Rational::new(fade_in_num, fade_in_den);
+	let fade_out = quercus_core::Rational::new(fade_out_num, fade_out_den);
+	crate::editor_commands::set_clip_fade(&project, clip, fade_in, fade_out).is_ok()
+}
+
+/// Attaches an audio effect (`type_id`) to a clip's audio chain at
+/// `index` (clamped to the chain length) as one undo entry. Returns false
+/// for a null/invalid session or clip, an empty type id, or a negative
+/// index.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_add_clip_audio_effect(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	type_id: *const u8,
+	type_id_len: usize,
+	index: i32,
+) -> bool {
+	let Some((project, clip)) = (unsafe { editor_audio_clip(session, clip) }) else {
+		return false;
+	};
+	let Some(type_id) = (unsafe { str_arg(type_id, type_id_len) }) else {
+		return false;
+	};
+	let Ok(index) = usize::try_from(index) else {
+		return false;
+	};
+	crate::editor_commands::add_clip_audio_effect(&project, clip, type_id, index).is_ok()
+}
+
+/// Removes one entry of a clip's audio effect chain as one undo entry.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_remove_clip_audio_effect(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	index: i32,
+) -> bool {
+	let Some((project, clip)) = (unsafe { editor_audio_clip(session, clip) }) else {
+		return false;
+	};
+	let Ok(index) = usize::try_from(index) else {
+		return false;
+	};
+	crate::editor_commands::remove_clip_audio_effect(&project, clip, index).is_ok()
+}
+
+/// Enables/disables one entry of a clip's audio effect chain.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_set_clip_audio_effect_enabled(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	index: i32,
+	enabled: bool,
+) -> bool {
+	let Some((project, clip)) = (unsafe { editor_audio_clip(session, clip) }) else {
+		return false;
+	};
+	let Ok(index) = usize::try_from(index) else {
+		return false;
+	};
+	crate::editor_commands::set_clip_audio_effect_enabled(&project, clip, index, enabled).is_ok()
+}
+
+/// Sets one static float parameter of a clip's audio effect. Phase 1
+/// exposes only float parameters (`volume_in`, `panning_in`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_set_clip_audio_effect_param(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	index: i32,
+	input_id: *const u8,
+	input_id_len: usize,
+	value: f64,
+) -> bool {
+	let Some((project, clip)) = (unsafe { editor_audio_clip(session, clip) }) else {
+		return false;
+	};
+	let Some(input_id) = (unsafe { str_arg(input_id, input_id_len) }) else {
+		return false;
+	};
+	let Ok(index) = usize::try_from(index) else {
+		return false;
+	};
+	crate::editor_commands::set_clip_audio_effect_param(
+		&project, clip, index, input_id, value,
+	)
+	.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

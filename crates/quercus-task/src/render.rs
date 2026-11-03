@@ -60,8 +60,8 @@ use quercus_node::sequence::SequenceBehavior;
 use quercus_node::track::{TrackBehavior, TrackListBehavior, TrackType};
 use quercus_render::procpool::{bgra8_to_f32_rgba, DispatcherConfig, ProcessDispatcher, ShmFrameRef};
 use quercus_render::ticket::{
-	ticket_kind, AudioTicketParams, MontageClip, MontageEffect, TicketArena, TicketId,
-	TicketPayload, TicketResult, VideoTicketParams,
+	ticket_kind, AudioTicketParams, MontageAudio, MontageClip, MontageEffect, TicketArena,
+	TicketId, TicketPayload, TicketResult, VideoTicketParams,
 };
 use quercus_render::worker::JobDispatch;
 
@@ -467,14 +467,19 @@ impl RenderTask {
 					else {
 						continue;
 					};
+					let audio = MontageAudio::from_block_core(&core);
 					montage.push(MontageClip {
 						filename: footage.filename.clone(),
 						stream_index: 0,
 						in_time: core.in_(),
 						out_time: core.out(),
 						media_in: core.media_in,
-						gain: 1.0,
+						gain: audio.gain,
+						pan: audio.pan,
+						fade_in: audio.fade_in,
+						fade_out: audio.fade_out,
 						effects: Self::clip_effects(&guard.graph, *block_id, time),
+						audio_effects: audio.effects,
 					});
 				}
 			}
@@ -576,16 +581,21 @@ impl RenderTask {
 					let Some((filename, stream_index)) = Self::audio_media(footage) else {
 						continue;
 					};
+					let audio = MontageAudio::from_block_core(&core);
 					montage.push(MontageClip {
 						filename,
 						stream_index,
 						in_time: core.in_(),
 						out_time: core.out(),
 						media_in: core.media_in,
-						gain: core.audio_gain.clamp(0.0, 4.0) as f32,
-						// Audio clips carry no effect stack (video-side
-						// concept; the mixer never consults it).
+						gain: audio.gain,
+						pan: audio.pan,
+						fade_in: audio.fade_in,
+						fade_out: audio.fade_out,
+						// Audio clips carry no video effect stack; the
+						// clip's audio chain is `audio_effects` below.
 						effects: Vec::new(),
+						audio_effects: audio.effects,
 					});
 				}
 			}
@@ -1730,7 +1740,7 @@ mod tests {
 	}
 
 	#[test]
-	fn audio_montage_filters_kinds_and_drops_effects() {
+	fn audio_montage_filters_kinds_and_reads_clip_audio_fields() {
 		let project = project();
 		let sequence = add_sequence(&project);
 		let footage = add_footage(&project, "audio.mp4");
@@ -1787,7 +1797,8 @@ mod tests {
 			}
 		}
 
-		// Per-clip gain flows into the montage.
+		// Per-clip gain/pan/fade/audio-effect fields flow into the montage
+		// (the export builder and the preview builder share MontageAudio).
 		{
 			let mut guard = project.lock().unwrap();
 			if let Some(entry) = guard.graph.get_mut(ok) {
@@ -1797,6 +1808,17 @@ mod tests {
 					.and_then(|a| a.downcast_mut::<quercus_node::block::ClipBlockBehavior>())
 				{
 					clip.core.audio_gain = 0.5;
+					clip.core.audio_pan = -0.25;
+					clip.core.audio_fade_in = Rational::new(1, 2);
+					clip.core.audio_fade_out = Rational::new(1, 4);
+					let mut volume = quercus_node::block::ClipAudioEffect::new(
+						quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID,
+					);
+					volume.set_param(
+						quercus_node::block::AUDIO_VOLUME_INPUT,
+						quercus_node::value::NodeValue::Float(0.25),
+					);
+					clip.core.audio_effects = vec![volume];
 				}
 			}
 		}
@@ -1804,7 +1826,19 @@ mod tests {
 		assert_eq!(montage.len(), 1);
 		assert_eq!(montage[0].filename, "audio.mp4");
 		assert!((montage[0].gain - 0.5).abs() < 1e-6);
-		assert!(montage[0].effects.is_empty(), "audio carries no effects");
+		assert!((montage[0].pan + 0.25).abs() < 1e-6);
+		assert_eq!(montage[0].fade_in, Rational::new(1, 2));
+		assert_eq!(montage[0].fade_out, Rational::new(1, 4));
+		assert!(montage[0].effects.is_empty(), "audio carries no video effects");
+		assert_eq!(montage[0].audio_effects.len(), 1);
+		assert_eq!(
+			montage[0].audio_effects[0].type_id,
+			quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID
+		);
+		assert_eq!(
+			montage[0].audio_effects[0].param(quercus_node::block::AUDIO_VOLUME_INPUT),
+			Some(&quercus_node::value::NodeValue::Float(0.25))
+		);
 
 		assert!(RenderTask::audio_montage(&project, sequence, Rational::new(5, 1)).is_empty());
 		assert!(RenderTask::audio_montage(&project, NodeId::INVALID, Rational::new(0, 1)).is_empty());

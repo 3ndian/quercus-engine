@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-/* 54 POD structs, 14 enums, 718 functions. */
+/* 55 POD structs, 14 enums, 727 functions. */
 
 /* 3x3 color matrix returned by the colormath helpers. */
 typedef struct QuercusMat3 { float v[3][3]; } QuercusMat3;
@@ -256,6 +256,7 @@ typedef struct QuercusPluginDescriptor QuercusPluginDescriptor;
 typedef struct QuercusStorageError QuercusStorageError;
 typedef struct QuercusStorageProjectInfo QuercusStorageProjectInfo;
 typedef struct QuercusStorageTransportVTable QuercusStorageTransportVTable;
+typedef struct QuercusSubtitleStyle QuercusSubtitleStyle;
 typedef struct RawMulticamState RawMulticamState;
 typedef struct RawProxyStatus RawProxyStatus;
 typedef struct RectD RectD;
@@ -590,6 +591,17 @@ struct QuercusStorageTransportVTable {
     int32_t (* library_delete)(void*, const uint8_t*, size_t, const uint8_t*, size_t, QuercusStorageError*);
     int32_t (* library_rename)(void*, const uint8_t*, size_t, const uint8_t*, size_t, const uint8_t*, size_t, QuercusStorageError*);
     int32_t (* library_snapshot)(void*, const uint8_t*, size_t, const uint8_t*, size_t, QuercusStorageError*);
+};
+struct QuercusSubtitleStyle {
+    uint8_t font_family[128];
+    float font_size;
+    double color[4];
+    double outline_color[4];
+    float outline_width;
+    int32_t align;
+    float margin_h;
+    float margin_v;
+    float line_spacing;
 };
 struct RawMulticamState {
     uint64_t sequence;
@@ -986,6 +998,7 @@ VideoParams quercus_core_videoparams_default(void);
 int32_t quercus_core_videoparams_effective_height(const VideoParams* params);
 int32_t quercus_core_videoparams_effective_width(const VideoParams* params);
 bool quercus_core_videoparams_is_valid(const VideoParams* params);
+bool quercus_editor_add_clip_audio_effect(const void* session, uint64_t clip, const uint8_t* type_id, size_t type_id_len, int32_t index);
 void quercus_editor_add_ref(const void* session);
 void* quercus_editor_adopt_storage_project_handle(StorageProjectHandle project);
 bool quercus_editor_bind_project_to_library(void* session);
@@ -1014,6 +1027,7 @@ void quercus_editor_graph_release(const void* graph);
 int64_t quercus_editor_graph_revision(const void* graph);
 void* quercus_editor_graph_snapshot(void* session, uint64_t sequence, uint64_t clip);
 int32_t quercus_editor_import_subtitles(const void* session, const uint8_t* path, size_t path_len, int32_t track_index);
+int32_t quercus_editor_import_subtitles_styled(const void* session, const uint8_t* path, size_t path_len, int32_t track_index, const QuercusSubtitleStyle* style);
 bool quercus_editor_marker_at(const void* session, int32_t index, EditorMarkerRaw* out);
 int32_t quercus_editor_marker_count(const void* session);
 int32_t quercus_editor_marker_name_at(const void* session, int32_t index, uint8_t* buf, size_t buf_len);
@@ -1055,11 +1069,18 @@ uint64_t quercus_editor_proxy_generate(const void* session, uint64_t footage, co
 int32_t quercus_editor_proxy_path(const void* session, uint64_t footage, uint8_t* buf, size_t buf_len);
 bool quercus_editor_proxy_status(const void* session, uint64_t footage, RawProxyStatus* out);
 void quercus_editor_release(const void* session);
+bool quercus_editor_remove_clip_audio_effect(const void* session, uint64_t clip, int32_t index);
 int32_t quercus_editor_save(const void* session, const uint8_t* path, size_t path_len, uint32_t options);
+bool quercus_editor_set_clip_audio_effect_enabled(const void* session, uint64_t clip, int32_t index, bool enabled);
+bool quercus_editor_set_clip_audio_effect_param(const void* session, uint64_t clip, int32_t index, const uint8_t* input_id, size_t input_id_len, double value);
+bool quercus_editor_set_clip_fade(const void* session, uint64_t clip, int64_t fade_in_num, int64_t fade_in_den, int64_t fade_out_num, int64_t fade_out_den);
 bool quercus_editor_set_clip_gain(const void* session, uint64_t clip, double gain);
+bool quercus_editor_set_clip_pan(const void* session, uint64_t clip, double pan);
 bool quercus_editor_set_current_sequence(void* session, uint64_t id);
+bool quercus_editor_set_subtitle_style(const void* session, uint64_t clip, const QuercusSubtitleStyle* style);
 bool quercus_editor_storage_bound(const void* session);
 int32_t quercus_editor_storage_last_error(const void* session, uint8_t* buf, size_t buf_len);
+QuercusSubtitleStyle quercus_editor_subtitle_style_default(void);
 bool quercus_editor_unbind(void* session);
 bool quercus_editor_workarea(const void* session, TimeRange* out);
 uint64_t quercus_effect_chain_at(const void* project, uint64_t host, int32_t index);

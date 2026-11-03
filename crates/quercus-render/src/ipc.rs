@@ -392,6 +392,22 @@ pub struct WireMontageEffect {
 	pub params: Vec<WireEffectParam>,
 }
 
+/// One effect of a montage clip's audio chain on the wire (protocol v2
+/// additive field of [`WireMontageClip`]; source-first order).
+///
+/// The audio chain has no effect-input id: every entry feeds the mixer's
+/// sample buffer, so this is a slimmer shape than [`WireMontageEffect`].
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct WireMontageAudioEffect {
+	/// Built-in node type id (e.g. `org.olivevideoeditor.Olive.volume`).
+	pub type_id: String,
+	/// Enabled flag (disabled effects are bypassed).
+	pub enabled: bool,
+	/// Static parameter values.
+	pub params: Vec<WireEffectParam>,
+}
+
 /// One montage clip on the wire (rationals flattened to num/den pairs).
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
 #[serde(default)]
@@ -414,9 +430,121 @@ pub struct WireMontageClip {
 	pub media_in_den: i64,
 	/// Playback gain (1.0 = unity).
 	pub gain: f32,
-	/// The clip's effect stack (protocol v2 additive: older peers omit the
-	/// field and it defaults to an empty stack).
+	/// Constant-power stereo pan (-1..1).
+	pub pan: f32,
+	/// Fade-in numerator (protocol v2 additive; 0/1 when absent).
+	pub fade_in_num: i64,
+	/// Fade-in denominator (0 in older payloads; read as "no fade").
+	pub fade_in_den: i64,
+	/// Fade-out numerator (protocol v2 additive; 0/1 when absent).
+	pub fade_out_num: i64,
+	/// Fade-out denominator (0 in older payloads; read as "no fade").
+	pub fade_out_den: i64,
+	/// The clip's audio effect chain (protocol v2 additive: older peers
+	/// omit the field and it defaults to an empty chain).
+	pub audio_effects: Vec<WireMontageAudioEffect>,
+	/// The clip's video effect stack (protocol v2 additive: older peers omit
+	/// the field and it defaults to an empty stack).
 	pub effects: Vec<WireMontageEffect>,
+}
+
+/// A rational's wire parts. `0/1` is the no-duration sentinel.
+fn wire_rational_parts(value: quercus_core::Rational) -> (i64, i64) {
+	if value.denominator() <= 0 {
+		(0, 1)
+	} else {
+		(value.numerator(), value.denominator())
+	}
+}
+
+/// Rebuild a rational from wire parts. Old payloads omit the fields
+/// (0/0) and must read as "no fade", not NaN.
+fn rational_from_wire_parts(num: i64, den: i64) -> quercus_core::Rational {
+	if den <= 0 {
+		quercus_core::Rational::new(0, 1)
+	} else {
+		quercus_core::Rational::new(num, den)
+	}
+}
+
+/// Map a ticket-side audio effect to its wire form.
+pub fn wire_audio_effect_from(
+	effect: &crate::ticket::MontageAudioEffect,
+) -> WireMontageAudioEffect {
+	WireMontageAudioEffect {
+		type_id: effect.type_id.clone(),
+		enabled: effect.enabled,
+		params: effect
+			.params
+			.iter()
+			.filter_map(|(input, value)| {
+				WireNodeValue::from_node_value(value).map(|value| WireEffectParam {
+					input: input.clone(),
+					value,
+				})
+			})
+			.collect(),
+	}
+}
+
+/// Map a wire audio effect back to the ticket-side form (worker).
+pub fn montage_audio_effect_from(
+	wire: &WireMontageAudioEffect,
+) -> crate::ticket::MontageAudioEffect {
+	crate::ticket::MontageAudioEffect {
+		type_id: wire.type_id.clone(),
+		enabled: wire.enabled,
+		params: wire
+			.params
+			.iter()
+			.map(|p| (p.input.clone(), p.value.to_node_value()))
+			.collect(),
+	}
+}
+
+/// Map a ticket-side montage clip to its wire form.
+pub fn wire_montage_clip_from(clip: &crate::ticket::MontageClip) -> WireMontageClip {
+	let (fade_in_num, fade_in_den) = wire_rational_parts(clip.fade_in);
+	let (fade_out_num, fade_out_den) = wire_rational_parts(clip.fade_out);
+	WireMontageClip {
+		filename: clip.filename.clone(),
+		stream_index: clip.stream_index,
+		in_num: clip.in_time.numerator(),
+		in_den: clip.in_time.denominator(),
+		out_num: clip.out_time.numerator(),
+		out_den: clip.out_time.denominator(),
+		media_in_num: clip.media_in.numerator(),
+		media_in_den: clip.media_in.denominator(),
+		gain: clip.gain,
+		pan: clip.pan,
+		fade_in_num,
+		fade_in_den,
+		fade_out_num,
+		fade_out_den,
+		audio_effects: clip.audio_effects.iter().map(wire_audio_effect_from).collect(),
+		effects: clip.effects.iter().map(wire_effect_from).collect(),
+	}
+}
+
+/// Map a wire montage clip back to the ticket-side form (worker).
+pub fn montage_clip_from(wire: &WireMontageClip) -> crate::ticket::MontageClip {
+	crate::ticket::MontageClip {
+		filename: wire.filename.clone(),
+		stream_index: wire.stream_index,
+		in_time: quercus_core::Rational::new(wire.in_num, wire.in_den),
+		out_time: quercus_core::Rational::new(wire.out_num, wire.out_den),
+		media_in: quercus_core::Rational::new(wire.media_in_num, wire.media_in_den),
+		gain: wire.gain,
+		pan: wire.pan,
+		fade_in: rational_from_wire_parts(wire.fade_in_num, wire.fade_in_den),
+		fade_out: rational_from_wire_parts(wire.fade_out_num, wire.fade_out_den),
+		effects: wire.effects.iter().map(montage_effect_from).collect(),
+		audio_effects: wire
+			.audio_effects
+			.iter()
+			.map(montage_audio_effect_from)
+			.collect(),
+	}
 }
 
 /// Map a ticket-side montage effect to its wire form (main process;
@@ -2239,6 +2367,19 @@ mod tests {
 						media_in_num: 10,
 						media_in_den: 24,
 						gain: 0.5,
+						pan: -0.5,
+						fade_in_num: 1,
+						fade_in_den: 4,
+						fade_out_num: 0,
+						fade_out_den: 1,
+						audio_effects: vec![WireMontageAudioEffect {
+							type_id: "org.olivevideoeditor.Olive.volume".into(),
+							enabled: true,
+							params: vec![WireEffectParam {
+								input: "volume_in".into(),
+								value: WireNodeValue::Float(0.25),
+							}],
+						}],
 						effects: vec![WireMontageEffect {
 							type_id: "org.olivevideoeditor.Olive.opacity".into(),
 							enabled: true,
@@ -2281,6 +2422,18 @@ mod tests {
 		assert_eq!(
 			value["tickets"][1]["montage"][0]["effects"][0]["type_id"],
 			"org.olivevideoeditor.Olive.opacity"
+		);
+		// Per-clip audio post fields ride the same additive wire shape.
+		assert_eq!(value["tickets"][1]["montage"][0]["pan"], -0.5);
+		assert_eq!(value["tickets"][1]["montage"][0]["fade_in_num"], 1);
+		assert_eq!(value["tickets"][1]["montage"][0]["fade_in_den"], 4);
+		assert_eq!(
+			value["tickets"][1]["montage"][0]["audio_effects"][0]["type_id"],
+			"org.olivevideoeditor.Olive.volume"
+		);
+		assert_eq!(
+			value["tickets"][1]["montage"][0]["audio_effects"][0]["params"][0]["value"],
+			json!({ "t": "float", "v": 0.25 })
 		);
 		assert_eq!(
 			value["tickets"][1]["montage"][0]["effects"][0]["params"][0]["value"],
@@ -2355,6 +2508,41 @@ mod tests {
 		});
 		let parsed: WireMontageClip = serde_json::from_value(legacy).unwrap();
 		assert!(parsed.effects.is_empty(), "v1 clips carry no effects");
+		assert!(parsed.audio_effects.is_empty(), "v1 clips carry no audio effects");
+		assert_eq!(parsed.pan, 0.0, "v1 clips are unpanned");
+		assert_eq!(parsed.fade_in_den, 0, "v1 clips have no fade fields");
+		// The conversion treats the missing 0/0 rationals as "no fade"
+		// rather than a NaN duration.
+		let clip = montage_clip_from(&parsed);
+		assert_eq!(clip.fade_in, quercus_core::Rational::new(0, 1));
+		assert_eq!(clip.fade_out, quercus_core::Rational::new(0, 1));
+		assert_eq!(clip.pan, 0.0);
+		assert!(clip.audio_effects.is_empty());
+
+		// Ticket -> wire -> ticket keeps the audio post fields.
+		let mut ticket_clip = clip;
+		ticket_clip.gain = 0.5;
+		ticket_clip.pan = 0.25;
+		ticket_clip.fade_in = quercus_core::Rational::new(1, 8);
+		ticket_clip.fade_out = quercus_core::Rational::new(3, 8);
+		ticket_clip.audio_effects = vec![crate::ticket::MontageAudioEffect {
+			type_id: "org.olivevideoeditor.Olive.pan".into(),
+			enabled: false,
+			params: vec![(
+				"panning_in".into(),
+				quercus_node::value::NodeValue::Float(-0.25),
+			)],
+		}];
+		let wire = wire_montage_clip_from(&ticket_clip);
+		assert_eq!(wire.pan, 0.25);
+		assert_eq!((wire.fade_in_num, wire.fade_in_den), (1, 8));
+		assert_eq!((wire.fade_out_num, wire.fade_out_den), (3, 8));
+		let back = montage_clip_from(&wire);
+		assert_eq!(back.gain, ticket_clip.gain);
+		assert_eq!(back.pan, ticket_clip.pan);
+		assert_eq!(back.fade_in, ticket_clip.fade_in);
+		assert_eq!(back.fade_out, ticket_clip.fade_out);
+		assert_eq!(back.audio_effects, ticket_clip.audio_effects);
 
 		use quercus_node::value::NodeValue as NV;
 		let cases = [
@@ -2440,6 +2628,12 @@ mod tests {
 					media_in_num: 10,
 					media_in_den: 24,
 					gain: 0.5,
+					pan: 0.0,
+					fade_in_num: 0,
+					fade_in_den: 24,
+					fade_out_num: 0,
+					fade_out_den: 24,
+					audio_effects: vec![],
 					effects: vec![],
 				}],
 			}],

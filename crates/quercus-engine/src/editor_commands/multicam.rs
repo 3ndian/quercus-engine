@@ -13,8 +13,12 @@ use super::{
 	},
 	sequence::{clip_track, find_input_footage, track_ids, track_list_of},
 };
-use quercus_node::block::clip_input;
+use quercus_node::block::{
+	AUDIO_EFFECT_PAN_TYPE_ID, AUDIO_EFFECT_VOLUME_TYPE_ID, AUDIO_PAN_INPUT, AUDIO_VOLUME_INPUT,
+	ClipAudioEffect, clip_input,
+};
 use quercus_node::nodes::multicamnode::{CURRENT_INPUT, SEQUENCE_INPUT, SEQUENCE_TYPE_INPUT};
+use quercus_node::value::NodeValue;
 
 /// Resolved multicam state for UI and independent SDK consumers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,3 +373,206 @@ pub fn set_clip_gain(project: &ProjectRef, clip: NodeId, gain: f64) -> Result<()
 		"Set Clip Gain",
 	)
 }
+
+/// Replace one clip's whole [`BlockCore`] (undo/redo hook for the
+/// audio-parameter commands below).
+fn set_clip_core(project: &ProjectRef, clip: NodeId, core: &BlockCore) {
+	if let Some(clip) = lock(project)
+		.graph
+		.get_mut(clip)
+		.and_then(|entry| entry.behavior.as_any_mut())
+		.and_then(|behavior| behavior.downcast_mut::<ClipBlockBehavior>())
+	{
+		clip.core = core.clone();
+	}
+}
+
+/// Apply `update` to a cloned clip core and push one undo row. The
+/// closure returns whether anything changed; a no-op push is skipped.
+///
+/// The whole core is captured in both directions, matching the gain
+/// command's semantics: undo restores every field, not just the ones the
+/// command touched.
+fn update_clip_core(
+	project: &ProjectRef,
+	clip: NodeId,
+	label: &'static str,
+	update: impl FnOnce(&mut BlockCore) -> Result<bool, String>,
+) -> Result<(), String> {
+	let (old, new) = {
+		let guard = lock(project);
+		let old = guard
+			.graph
+			.get(clip)
+			.and_then(|entry| entry.behavior.as_any())
+			.and_then(|behavior| behavior.downcast_ref::<ClipBlockBehavior>())
+			.map(|clip| clip.core.clone())
+			.ok_or_else(|| "the node is not a clip".to_string())?;
+		let mut new = old.clone();
+		if !update(&mut new)? {
+			return Ok(());
+		}
+		(old, new)
+	};
+	let redo_project = project.clone();
+	let undo_project = project.clone();
+	push_command(
+		quercus_undo::undocommand::UndoCommand::from_closures(
+			move || set_clip_core(&redo_project, clip, &new),
+			move || set_clip_core(&undo_project, clip, &old),
+		),
+		label,
+	)
+}
+
+/// Validate a fade duration: finite and non-negative. A fade longer than
+/// the clip is allowed; the mixer clamps the ramp at the clip's bounds.
+fn validate_fade(which: &str, fade: Rational) -> Result<(), String> {
+	let seconds = fade.to_f64();
+	if !seconds.is_finite() || seconds < 0.0 {
+		return Err(format!("audio {which} fade must be finite and >= 0"));
+	}
+	Ok(())
+}
+
+/// Set a clip's constant-power stereo pan (-1 = hard left, 1 = hard right)
+/// as one undoable command.
+pub fn set_clip_pan(project: &ProjectRef, clip: NodeId, pan: f64) -> Result<(), String> {
+	if !pan.is_finite() || !(-1.0..=1.0).contains(&pan) {
+		return Err("audio pan must be finite and within -1..=1".into());
+	}
+	update_clip_core(project, clip, "Set Clip Pan", |core| {
+		if core.audio_pan == pan {
+			return Ok(false);
+		}
+		core.audio_pan = pan;
+		Ok(true)
+	})
+}
+
+/// Set a clip's linear fade-in/fade-out durations as one undoable
+/// command. Both are anchored at the clip's timeline in/out points.
+pub fn set_clip_fade(
+	project: &ProjectRef,
+	clip: NodeId,
+	fade_in: Rational,
+	fade_out: Rational,
+) -> Result<(), String> {
+	validate_fade("in", fade_in)?;
+	validate_fade("out", fade_out)?;
+	update_clip_core(project, clip, "Set Clip Fade", |core| {
+		if core.audio_fade_in == fade_in && core.audio_fade_out == fade_out {
+			return Ok(false);
+		}
+		core.audio_fade_in = fade_in;
+		core.audio_fade_out = fade_out;
+		Ok(true)
+	})
+}
+
+/// Attach an audio effect to a clip at `index` (clamped to the chain
+/// length) as one undoable command.
+///
+/// Phase 1 evaluates the built-in `Volume` and `Pan` kernels; any other
+/// type id is carried in the chain and bypassed with a one-shot render
+/// warning, so attaching a not-yet-supported effect is non-destructive.
+pub fn add_clip_audio_effect(
+	project: &ProjectRef,
+	clip: NodeId,
+	type_id: &str,
+	index: usize,
+) -> Result<(), String> {
+	let type_id = type_id.trim();
+	if type_id.is_empty() {
+		return Err("audio effect type id must not be empty".into());
+	}
+	let effect = ClipAudioEffect::new(type_id);
+	update_clip_core(project, clip, "Add Clip Audio Effect", |core| {
+		let index = index.min(core.audio_effects.len());
+		core.audio_effects.insert(index, effect);
+		Ok(true)
+	})
+}
+
+/// Remove one entry of a clip's audio effect chain as one undoable
+/// command.
+pub fn remove_clip_audio_effect(
+	project: &ProjectRef,
+	clip: NodeId,
+	index: usize,
+) -> Result<(), String> {
+	update_clip_core(project, clip, "Remove Clip Audio Effect", |core| {
+		if index >= core.audio_effects.len() {
+			return Err("audio effect index out of range".into());
+		}
+		core.audio_effects.remove(index);
+		Ok(true)
+	})
+}
+
+/// Enable/disable one entry of a clip's audio effect chain (disabled
+/// effects are bypassed by the mixer).
+pub fn set_clip_audio_effect_enabled(
+	project: &ProjectRef,
+	clip: NodeId,
+	index: usize,
+	enabled: bool,
+) -> Result<(), String> {
+	update_clip_core(project, clip, "Set Clip Audio Effect Enabled", |core| {
+		let effect = core
+			.audio_effects
+			.get_mut(index)
+			.ok_or_else(|| "audio effect index out of range".to_string())?;
+		if effect.enabled == enabled {
+			return Ok(false);
+		}
+		effect.enabled = enabled;
+		Ok(true)
+	})
+}
+
+/// Set one static float parameter of a clip's audio effect.
+///
+/// Phase 1 boundary: only float parameters are exposed here (Volume
+/// `volume_in`, Pan `panning_in`); keyframed/dynamic parameters and
+/// non-float inputs remain a Phase-2 follow-up.
+pub fn set_clip_audio_effect_param(
+	project: &ProjectRef,
+	clip: NodeId,
+	index: usize,
+	input_id: &str,
+	value: f64,
+) -> Result<(), String> {
+	let input_id = input_id.trim();
+	if input_id.is_empty() {
+		return Err("audio effect input id must not be empty".into());
+	}
+	if !value.is_finite() {
+		return Err("audio effect parameter must be finite".into());
+	}
+	let input_id = input_id.to_string();
+	update_clip_core(project, clip, "Set Clip Audio Effect Param", |core| {
+		let effect = core
+			.audio_effects
+			.get_mut(index)
+			.ok_or_else(|| "audio effect index out of range".to_string())?;
+		if effect.param(&input_id) == Some(&NodeValue::Float(value)) {
+			return Ok(false);
+		}
+		effect.set_param(&input_id, NodeValue::Float(value));
+		Ok(true)
+	})
+}
+
+/// The Volume effect type id (re-exported for the dispatcher's validation
+/// and for SDK-side convenience constants).
+pub const VOLUME_AUDIO_EFFECT: &str = AUDIO_EFFECT_VOLUME_TYPE_ID;
+
+/// The Pan effect type id.
+pub const PAN_AUDIO_EFFECT: &str = AUDIO_EFFECT_PAN_TYPE_ID;
+
+/// The Volume effect's parameter input id.
+pub const VOLUME_AUDIO_EFFECT_INPUT: &str = AUDIO_VOLUME_INPUT;
+
+/// The Pan effect's parameter input id.
+pub const PAN_AUDIO_EFFECT_INPUT: &str = AUDIO_PAN_INPUT;

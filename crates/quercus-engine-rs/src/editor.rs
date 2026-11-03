@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use crate::codec::string_out;
 use crate::node::{NodeId, Project};
 use crate::storage::StorageError;
-use crate::types::TimeRange;
+use crate::types::{Rational, TimeRange};
 
 /// Owned C-compatible storage project handle used only for same-instance
 /// migration. Layout matches `quercus_core::handle::CHandle` exactly.
@@ -78,6 +78,37 @@ unsafe extern "C" {
 		path_len: usize,
 	) -> i32;
 	fn quercus_editor_set_clip_gain(session: *const c_void, clip: u64, gain: f64) -> bool;
+	fn quercus_editor_set_clip_pan(session: *const c_void, clip: u64, pan: f64) -> bool;
+	fn quercus_editor_set_clip_fade(
+		session: *const c_void,
+		clip: u64,
+		fade_in_num: i64,
+		fade_in_den: i64,
+		fade_out_num: i64,
+		fade_out_den: i64,
+	) -> bool;
+	fn quercus_editor_add_clip_audio_effect(
+		session: *const c_void,
+		clip: u64,
+		type_id: *const u8,
+		type_id_len: usize,
+		index: i32,
+	) -> bool;
+	fn quercus_editor_remove_clip_audio_effect(session: *const c_void, clip: u64, index: i32) -> bool;
+	fn quercus_editor_set_clip_audio_effect_enabled(
+		session: *const c_void,
+		clip: u64,
+		index: i32,
+		enabled: bool,
+	) -> bool;
+	fn quercus_editor_set_clip_audio_effect_param(
+		session: *const c_void,
+		clip: u64,
+		index: i32,
+		input_id: *const u8,
+		input_id_len: usize,
+		value: f64,
+	) -> bool;
 }
 
 #[repr(C)]
@@ -352,6 +383,88 @@ impl EditorSession {
 		unsafe { quercus_editor_set_clip_gain(self.ptr, clip.raw(), gain) }
 	}
 
+	/// Sets a clip's constant-power stereo pan (-1..=1, 0 = centre) as one
+	/// undo entry.
+	pub fn set_clip_pan(&self, clip: NodeId, pan: f64) -> bool {
+		unsafe { quercus_editor_set_clip_pan(self.ptr, clip.raw(), pan) }
+	}
+
+	/// Sets a clip's linear fade-in/fade-out durations as one undo entry.
+	/// Both rationals are clamped/validated by the engine (negative or NaN
+	/// durations are rejected).
+	pub fn set_clip_fade(&self, clip: NodeId, fade_in: Rational, fade_out: Rational) -> bool {
+		unsafe {
+			quercus_editor_set_clip_fade(
+				self.ptr,
+				clip.raw(),
+				fade_in.num,
+				fade_in.den,
+				fade_out.num,
+				fade_out.den,
+			)
+		}
+	}
+
+	/// Attaches an audio effect to a clip's chain at `index` (clamped to
+	/// the chain length) as one undo entry. Returns false for an empty
+	/// type id.
+	pub fn add_clip_audio_effect(&self, clip: NodeId, type_id: &str, index: usize) -> bool {
+		let Ok(index) = i32::try_from(index) else {
+			return false;
+		};
+		unsafe {
+			quercus_editor_add_clip_audio_effect(
+				self.ptr,
+				clip.raw(),
+				type_id.as_ptr(),
+				type_id.len(),
+				index,
+			)
+		}
+	}
+
+	/// Removes one entry of a clip's audio effect chain.
+	pub fn remove_clip_audio_effect(&self, clip: NodeId, index: usize) -> bool {
+		let Ok(index) = i32::try_from(index) else {
+			return false;
+		};
+		unsafe { quercus_editor_remove_clip_audio_effect(self.ptr, clip.raw(), index) }
+	}
+
+	/// Enables/disables one entry of a clip's audio effect chain.
+	pub fn set_clip_audio_effect_enabled(&self, clip: NodeId, index: usize, enabled: bool) -> bool {
+		let Ok(index) = i32::try_from(index) else {
+			return false;
+		};
+		unsafe {
+			quercus_editor_set_clip_audio_effect_enabled(self.ptr, clip.raw(), index, enabled)
+		}
+	}
+
+	/// Sets one static float parameter of a clip's audio effect (Phase 1:
+	/// Volume `volume_in`, Pan `panning_in`).
+	pub fn set_clip_audio_effect_param(
+		&self,
+		clip: NodeId,
+		index: usize,
+		input_id: &str,
+		value: f64,
+	) -> bool {
+		let Ok(index) = i32::try_from(index) else {
+			return false;
+		};
+		unsafe {
+			quercus_editor_set_clip_audio_effect_param(
+				self.ptr,
+				clip.raw(),
+				index,
+				input_id.as_ptr(),
+				input_id.len(),
+				value,
+			)
+		}
+	}
+
 	/// Exports the current sequence's Text clips as an SRT file.
 	pub fn export_subtitles(&self, path: &std::path::Path) -> Result<usize, i32> {
 		let path = path.to_str().ok_or(-1)?;
@@ -385,10 +498,12 @@ mod media;
 pub mod proxy;
 pub mod sync;
 pub mod multicam;
+mod subtitles;
 pub use snapshot::*;
 pub use graph::*;
 pub use params::*;
 pub use notify::*;
+pub use subtitles::*;
 
 #[cfg(test)]
 mod tests {
@@ -677,6 +792,31 @@ mod edit_result_primary_tests {
 #[cfg(test)]
 mod subtitle_roundtrip_tests {
 	use super::*;
+	use std::sync::atomic::{AtomicU64, Ordering};
+
+	static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+	fn temp_srt(tag: &str, contents: &str) -> std::path::PathBuf {
+		let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+		let path = std::env::temp_dir().join(format!(
+			"quercus_sdk_subtitle_{tag}_{}_{n}.srt",
+			std::process::id()
+		));
+		std::fs::write(&path, contents).unwrap();
+		path
+	}
+
+	fn text_source(session: &EditorSession, sequence: NodeId, clip: NodeId) -> NodeId {
+		let graph = session
+			.graph_snapshot(sequence, Some(clip))
+			.expect("clip graph");
+		graph
+			.edges
+			.iter()
+			.find(|edge| !edge.synthetic && edge.to == clip && edge.input_id == "tex_in")
+			.map(|edge| edge.from)
+			.expect("clip has a texture source")
+	}
 
 	#[test]
 	fn srt_import_export_through_sdk() {
@@ -685,21 +825,13 @@ mod subtitle_roundtrip_tests {
 			.unwrap_or_else(|e| e.into_inner());
 		let session = EditorSession::new().expect("session");
 		let _sequence = session.create_sequence("Subtitle SDK").expect("sequence");
-		let input = std::env::temp_dir().join(format!(
-			"quercus_sdk_subtitle_{}.srt",
-			std::process::id()
-		));
-		std::fs::write(
-			&input,
+		let input = temp_srt(
+			"roundtrip",
 			"1\n00:00:00,500 --> 00:00:01,500\nFirst\n\n2\n00:00:02,000 --> 00:00:03,000\nSecond\n",
-		)
-		.unwrap();
+		);
 		let count = session.import_subtitles(&input, 0).expect("import");
 		assert_eq!(count, 2);
-		let output = std::env::temp_dir().join(format!(
-			"quercus_sdk_subtitle_out_{}.srt",
-			std::process::id()
-		));
+		let output = temp_srt("roundtrip_out", "");
 		let exported = session.export_subtitles(&output).expect("export");
 		assert_eq!(exported, 2);
 		let text = std::fs::read_to_string(&output).unwrap();
@@ -707,5 +839,230 @@ mod subtitle_roundtrip_tests {
 		assert!(text.contains("Second"));
 		let _ = std::fs::remove_file(input);
 		let _ = std::fs::remove_file(output);
+	}
+
+	#[test]
+	fn styled_import_and_set_style_are_undoable_through_sdk() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let sequence = session.create_sequence("Styled SDK").expect("sequence");
+		let input = temp_srt(
+			"styled",
+			"1\n00:00:00,500 --> 00:00:01,500\nFirst\n\n2\n00:00:02,000 --> 00:00:03,000\nSecond\n",
+		);
+		let style = SubtitleStyle {
+			font_family: "DejaVu Sans".to_string(),
+			font_size: 48.0,
+			color: [1.0, 0.25, 0.0, 1.0],
+			outline_color: [0.0, 0.0, 1.0, 1.0],
+			outline_width: 3.0,
+			align: 2,
+			..SubtitleStyle::default()
+		};
+		let count = session
+			.import_subtitles_styled(&input, 0, &style)
+			.expect("styled import");
+		assert_eq!(count, 2);
+
+		let snapshot = session.snapshot();
+		let sequence_snapshot = snapshot
+			.sequences
+			.iter()
+			.find(|s| s.id == sequence)
+			.expect("sequence");
+		// The track also holds gap blocks before/between cues; only the
+		// text clips are subtitles.
+		let clips = sequence_snapshot
+			.tracks
+			.iter()
+			.flat_map(|track| track.clips.iter())
+			.filter(|clip| clip.kind == Some(crate::node::NodeKind::Clip))
+			.collect::<Vec<_>>();
+		assert_eq!(clips.len(), 2);
+		let mut sources = Vec::new();
+		for clip in &clips {
+			let source = text_source(&session, sequence, clip.id);
+			let graph = session
+				.graph_snapshot(sequence, Some(clip.id))
+				.expect("clip graph");
+			assert_eq!(
+				graph
+					.nodes
+					.iter()
+					.find(|node| node.id == source)
+					.expect("source node")
+					.type_id,
+				"org.olivevideoeditor.Olive.text3"
+			);
+			let params = session.parameters(source).expect("text parameters");
+			assert_eq!(
+				params
+					.get("font_family_in")
+					.expect("font family")
+					.scalar_value()
+					.expect("font value")
+					.text
+					.as_deref(),
+				Some("DejaVu Sans")
+			);
+			let size = params
+				.get("font_size_in")
+				.expect("font size")
+				.scalar_value()
+				.expect("size value")
+				.pod
+				.expect("size pod");
+			assert_eq!(size.f[0], 48.0);
+			let color = params
+				.get("color_in")
+				.expect("color")
+				.scalar_value()
+				.expect("color value")
+				.pod
+				.expect("color pod");
+			assert_eq!(color.f, [1.0, 0.25, 0.0, 1.0]);
+			let outline = params
+				.get("outline_enabled_in")
+				.expect("outline enabled")
+				.scalar_value()
+				.expect("outline value")
+				.pod
+				.expect("outline pod");
+			assert_eq!(outline.num, 1);
+			let outline_width = params
+				.get("outline_width_in")
+				.expect("outline width")
+				.scalar_value()
+				.expect("outline width value")
+				.pod
+				.expect("outline width pod");
+			assert_eq!(outline_width.f[0], 3.0);
+			let align = session
+				.project()
+				.standard_value(source, "valign_in", -1)
+				.expect("vertical alignment");
+			assert_eq!(align.num, 2);
+			sources.push(source);
+		}
+
+		// Applying another style is one undo row; undo restores every field.
+		let clip = clips[0].id;
+		let replacement = SubtitleStyle {
+			font_family: "Serif".to_string(),
+			font_size: 30.0,
+			color: [0.0, 1.0, 0.0, 1.0],
+			outline_width: 0.0,
+			align: 0,
+			..SubtitleStyle::default()
+		};
+		assert!(
+			session.set_subtitle_style(clip, &replacement),
+			"style application succeeds"
+		);
+		let params = session.parameters(sources[0]).expect("styled parameters");
+		assert_eq!(
+			params
+				.get("font_family_in")
+				.unwrap()
+				.scalar_value()
+				.unwrap()
+				.text
+				.as_deref(),
+			Some("Serif")
+		);
+		assert_eq!(
+			params
+				.get("outline_enabled_in")
+				.unwrap()
+				.scalar_value()
+				.unwrap()
+				.pod
+				.unwrap()
+				.num,
+			0
+		);
+		assert!(crate::node::undo());
+		let restored = session.parameters(sources[0]).expect("restored parameters");
+		assert_eq!(
+			restored
+				.get("font_size_in")
+				.unwrap()
+				.scalar_value()
+				.unwrap()
+				.pod
+				.unwrap()
+				.f[0],
+			48.0
+		);
+		assert_eq!(
+			restored
+				.get("font_family_in")
+				.unwrap()
+				.scalar_value()
+				.unwrap()
+				.text
+				.as_deref(),
+			Some("DejaVu Sans")
+		);
+
+		// A non-text clip is rejected without panicking.
+		let plain = session.project().create_clip().expect("plain clip");
+		assert!(!session.set_subtitle_style(plain, &replacement));
+
+		assert_eq!(
+			EditorSession::default_subtitle_style(),
+			SubtitleStyle::default()
+		);
+		let _ = std::fs::remove_file(input);
+	}
+}
+
+#[cfg(test)]
+mod clip_audio_post_tests {
+	use super::*;
+	use crate::types::Rational;
+
+	/// The Phase-1 clip audio setters are reachable through the C ABI and
+	/// reject invalid values without panicking.
+	#[test]
+	fn clip_audio_post_setters_cross_the_abi() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let sequence = session.create_sequence("Audio Post").expect("sequence");
+		let project = session.project();
+		let list = project.sequence_track_list_at(sequence, 0);
+		let track = project.tracklist_track_at(list, 0);
+		let clip = project.create_clip().expect("clip");
+		assert!(project.track_append_block(track, clip));
+
+		assert!(session.set_clip_gain(clip, 0.5));
+		assert!(session.set_clip_pan(clip, -0.5));
+		assert!(session.set_clip_fade(clip, Rational::new(1, 2), Rational::new(1, 4)));
+		assert!(session.add_clip_audio_effect(
+			clip,
+			"org.olivevideoeditor.Olive.volume",
+			0
+		));
+		assert!(session.set_clip_audio_effect_param(clip, 0, "volume_in", 0.25));
+		assert!(session.add_clip_audio_effect(
+			clip,
+			"org.olivevideoeditor.Olive.pan",
+			1
+		));
+		assert!(session.set_clip_audio_effect_param(clip, 1, "panning_in", 0.5));
+		assert!(session.set_clip_audio_effect_enabled(clip, 1, false));
+		assert!(session.remove_clip_audio_effect(clip, 1));
+
+		// Invalid values come back as false.
+		assert!(!session.set_clip_pan(clip, 2.0));
+		assert!(!session.set_clip_fade(clip, Rational::new(-1, 1), Rational::new(0, 1)));
+		assert!(!session.add_clip_audio_effect(clip, "", 0));
+		assert!(!session.set_clip_audio_effect_param(clip, 99, "volume_in", 1.0));
+		assert!(!session.set_clip_audio_effect_enabled(clip, 99, true));
+		assert!(!session.remove_clip_audio_effect(clip, 99));
 	}
 }

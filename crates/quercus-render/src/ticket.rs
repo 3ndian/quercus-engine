@@ -60,6 +60,102 @@ pub struct MontageEffect {
 	pub params: Vec<(String, quercus_node::value::NodeValue)>,
 }
 
+/// One effect of a clip's audio effect chain (Phase 1 audio-post wiring:
+/// the mixer applies these after the clip's gain, pan and fades).
+///
+/// The chain is stored on the clip as
+/// [`quercus_node::block::ClipAudioEffect`] so preview, export and the
+/// render worker read the same ordered list. Only the built-in Volume and
+/// Pan kernels are evaluated today; an unknown `type_id` is bypassed with
+/// a one-shot warning instead of failing the render.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MontageAudioEffect {
+	/// Built-in node type id (e.g.
+	/// `org.olivevideoeditor.Olive.volume`).
+	pub type_id: String,
+	/// Disabled effects are bypassed by the mixer.
+	pub enabled: bool,
+	/// Static parameter values (input id -> value).
+	pub params: Vec<(String, quercus_node::value::NodeValue)>,
+}
+
+impl MontageAudioEffect {
+	/// The static value of `input`, if this effect carries one.
+	pub fn param(&self, input: &str) -> Option<&quercus_node::value::NodeValue> {
+		self.params
+			.iter()
+			.find(|(id, _)| id == input)
+			.map(|(_, value)| value)
+	}
+}
+
+/// The audio parameters shared by every montage builder.
+///
+/// [`MontageClip`] carries these as individual fields for the mixer, but
+/// preview and export must read them from the clip the same way: this
+/// helper is the single conversion point from the node-side
+/// [`quercus_node::block::BlockCore`] to the render-side values.
+#[derive(Clone, Debug)]
+pub struct MontageAudio {
+	/// Playback gain (1.0 = unity).
+	pub gain: f32,
+	/// Constant-power stereo pan (-1..1).
+	pub pan: f32,
+	/// Linear fade-in duration.
+	pub fade_in: Rational,
+	/// Linear fade-out duration.
+	pub fade_out: Rational,
+	/// Ordered effect chain.
+	pub effects: Vec<MontageAudioEffect>,
+}
+
+impl Default for MontageAudio {
+	fn default() -> Self {
+		MontageAudio {
+			gain: 1.0,
+			pan: 0.0,
+			fade_in: Rational::new(0, 1),
+			fade_out: Rational::new(0, 1),
+			effects: Vec::new(),
+		}
+	}
+}
+
+impl MontageAudio {
+	/// Read the audio fields a clip persists in its [`BlockCore`]
+	/// (gain/pan/fade clamped to their documented ranges).
+	///
+	/// [`BlockCore`]: quercus_node::block::BlockCore
+	pub fn from_block_core(core: &quercus_node::block::BlockCore) -> Self {
+		MontageAudio {
+			gain: core.audio_gain.clamp(0.0, 4.0) as f32,
+			pan: core.audio_pan.clamp(-1.0, 1.0) as f32,
+			fade_in: normalize_duration(core.audio_fade_in),
+			fade_out: normalize_duration(core.audio_fade_out),
+			effects: core
+				.audio_effects
+				.iter()
+				.map(|effect| MontageAudioEffect {
+					type_id: effect.type_id.clone(),
+					enabled: effect.enabled,
+					params: effect.params.clone(),
+				})
+				.collect(),
+		}
+	}
+}
+
+/// A negative/NaN duration in a hand-edited file becomes "no fade" rather
+/// than an inverted ramp.
+fn normalize_duration(value: Rational) -> Rational {
+	let seconds = value.to_f64();
+	if !seconds.is_finite() || seconds < 0.0 {
+		Rational::new(0, 1)
+	} else {
+		value
+	}
+}
+
 /// One clip of a sequence montage (M12 P0): the facade resolves the
 /// timeline into an ordered list of clips; the producer decodes each and
 /// composites them topmost-last.
@@ -77,9 +173,20 @@ pub struct MontageClip {
 	pub media_in: Rational,
 	/// Playback gain (1.0 = unity).
 	pub gain: f32,
-	/// The clip's effect stack (source-first; empty for audio clips and
-	/// for montage builders that do not resolve effect chains).
+	/// Constant-power stereo pan (-1 = hard left, 0 = centre, 1 = hard
+	/// right). Applied to the first two output channels; mono output and
+	/// extra channels are unaffected.
+	pub pan: f32,
+	/// Linear fade-in duration, anchored at [`Self::in_time`].
+	pub fade_in: Rational,
+	/// Linear fade-out duration, anchored at [`Self::out_time`].
+	pub fade_out: Rational,
+	/// The clip's video effect stack (source-first; empty for audio clips
+	/// and for montage builders that do not resolve effect chains).
 	pub effects: Vec<MontageEffect>,
+	/// The clip's audio effect chain (source-first; applied after
+	/// gain/pan/fades). Empty for video montage clips.
+	pub audio_effects: Vec<MontageAudioEffect>,
 }
 
 /// One adjustment layer of a sequence montage (M14 W3): a time range
@@ -968,5 +1075,52 @@ mod tests {
 		assert!(b.0 > a.0);
 		assert_ne!(a, b);
 		video.shutdown();
+	}
+
+	/// The montage audio view of a clip is read from the block core in one
+	/// place (preview/export both use it), with the persisted ranges
+	/// clamped and the effect chain copied in source-first order.
+	#[test]
+	fn montage_audio_reads_and_clamps_clip_fields() {
+		let mut core = quercus_node::block::BlockCore::default();
+		let defaults = MontageAudio::from_block_core(&core);
+		assert_eq!(defaults.gain, 1.0);
+		assert_eq!(defaults.pan, 0.0);
+		assert_eq!(defaults.fade_in, Rational::new(0, 1));
+		assert_eq!(defaults.fade_out, Rational::new(0, 1));
+		assert!(defaults.effects.is_empty());
+
+		core.audio_gain = 9.0;
+		core.audio_pan = -3.0;
+		core.audio_fade_in = Rational::new(-1, 1);
+		core.audio_fade_out = Rational::new(1, 2);
+		let mut volume =
+			quercus_node::block::ClipAudioEffect::new(quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID);
+		volume.set_param(
+			quercus_node::block::AUDIO_VOLUME_INPUT,
+			quercus_node::value::NodeValue::Float(0.5),
+		);
+		let pan = quercus_node::block::ClipAudioEffect::new(
+			quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID,
+		);
+		core.audio_effects = vec![volume, pan];
+		let audio = MontageAudio::from_block_core(&core);
+		assert_eq!(audio.gain, 4.0, "gain is clamped to the persisted range");
+		assert_eq!(audio.pan, -1.0, "pan is clamped to -1..1");
+		assert_eq!(audio.fade_in, Rational::new(0, 1), "negative fade -> none");
+		assert_eq!(audio.fade_out, Rational::new(1, 2));
+		assert_eq!(audio.effects.len(), 2);
+		assert_eq!(
+			audio.effects[0].type_id,
+			quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID
+		);
+		assert_eq!(
+			audio.effects[0].param(quercus_node::block::AUDIO_VOLUME_INPUT),
+			Some(&quercus_node::value::NodeValue::Float(0.5))
+		);
+		assert_eq!(
+			audio.effects[1].type_id,
+			quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID
+		);
 	}
 }

@@ -400,3 +400,129 @@ pub(crate) fn clip_gain_is_undoable_and_bounded() {
 		1.0
 	);
 }
+
+#[test]
+pub(crate) fn clip_pan_fade_and_audio_effects_are_undoable() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let sequence = create_sequence(&project, "Audio Post");
+	let footage = footage_with_duration(&project, Rational::new(1, 1));
+	let (core, behavior) = quercus_node::block::clip_create();
+	let clip = lock(&project).graph.add_node(core, behavior);
+	{
+		let mut guard = lock(&project);
+		let track = track_ids(&guard.graph, sequence, TrackType::Video)
+			.first()
+			.copied()
+			.unwrap();
+		guard
+			.graph
+			.get_mut(track)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<TrackBehavior>()
+			.unwrap()
+			.blocks
+			.push(clip);
+		guard
+			.graph
+			.connect(footage, clip, quercus_node::block::clip_input::TEXTURE_INPUT, -1)
+			.unwrap();
+	}
+	let core_of = || {
+		lock(&project)
+			.graph
+			.get(clip)
+			.unwrap()
+			.behavior
+			.as_any()
+			.unwrap()
+			.downcast_ref::<quercus_node::block::ClipBlockBehavior>()
+			.unwrap()
+			.core
+			.clone()
+	};
+
+	assert!(set_clip_pan(&project, clip, 0.25).is_ok());
+	assert!(set_clip_fade(&project, clip, Rational::new(1, 2), Rational::new(1, 4)).is_ok());
+	assert!(
+		add_clip_audio_effect(
+			&project,
+			clip,
+			quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID,
+			0
+		)
+		.is_ok()
+	);
+	assert!(
+		add_clip_audio_effect(
+			&project,
+			clip,
+			quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID,
+			1
+		)
+		.is_ok()
+	);
+	assert!(
+		set_clip_audio_effect_param(
+			&project,
+			clip,
+			0,
+			quercus_node::block::AUDIO_VOLUME_INPUT,
+			0.25
+		)
+		.is_ok()
+	);
+	assert!(set_clip_audio_effect_enabled(&project, clip, 0, false).is_ok());
+
+	{
+		let core = core_of();
+		assert_eq!(core.audio_pan, 0.25);
+		assert_eq!(core.audio_fade_in, Rational::new(1, 2));
+		assert_eq!(core.audio_fade_out, Rational::new(1, 4));
+		assert_eq!(core.audio_effects.len(), 2);
+		assert_eq!(
+			core.audio_effects[0].type_id,
+			quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID
+		);
+		assert!(!core.audio_effects[0].enabled);
+		assert_eq!(
+			core.audio_effects[0].param(quercus_node::block::AUDIO_VOLUME_INPUT),
+			Some(&quercus_node::value::NodeValue::Float(0.25))
+		);
+		assert_eq!(
+			core.audio_effects[1].type_id,
+			quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID
+		);
+	}
+
+	// Every edit is exactly one undo row, in reverse order.
+	quercus_undo::global::undo().unwrap();
+	assert!(core_of().audio_effects[0].enabled);
+	quercus_undo::global::undo().unwrap();
+	assert_eq!(core_of().audio_effects[0].params, Vec::new());
+	quercus_undo::global::undo().unwrap();
+	assert_eq!(core_of().audio_effects.len(), 1);
+	quercus_undo::global::undo().unwrap();
+	assert!(core_of().audio_effects.is_empty());
+	quercus_undo::global::undo().unwrap();
+	assert_eq!(core_of().audio_fade_in, Rational::new(0, 1));
+	assert_eq!(core_of().audio_fade_out, Rational::new(0, 1));
+	quercus_undo::global::undo().unwrap();
+	assert_eq!(core_of().audio_pan, 0.0);
+
+	// Validation keeps invalid edits off the undo stack.
+	assert!(set_clip_pan(&project, clip, 2.0).is_err());
+	assert!(set_clip_pan(&project, clip, f64::NAN).is_err());
+	assert!(
+		set_clip_fade(&project, clip, Rational::new(-1, 1), Rational::new(0, 1)).is_err()
+	);
+	assert!(add_clip_audio_effect(&project, clip, "  ", 0).is_err());
+	assert!(set_clip_audio_effect_enabled(&project, clip, 9, true).is_err());
+	assert!(remove_clip_audio_effect(&project, clip, 9).is_err());
+	assert!(set_clip_audio_effect_param(&project, clip, 9, "volume_in", 1.0).is_err());
+	assert!(set_clip_audio_effect_param(&project, clip, 0, "volume_in", f64::INFINITY).is_err());
+}

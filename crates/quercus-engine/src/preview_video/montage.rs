@@ -9,7 +9,7 @@ use quercus_node::project::Project;
 use quercus_node::sequence::SequenceBehavior;
 use quercus_node::track::{TrackBehavior, TrackListBehavior, TrackType};
 use quercus_node::value::ValueType;
-use quercus_render::ticket::{AdjustmentSpan, MontageClip, MontageEffect};
+use quercus_render::ticket::{AdjustmentSpan, MontageAudio, MontageClip, MontageEffect};
 
 use crate::editor_commands as ops;
 
@@ -225,14 +225,19 @@ pub(crate) fn video_montage_with_adjustments(
 							(filename, stream_index, clip.core.media_in)
 						}
 					};
+				let audio = MontageAudio::from_block_core(&clip.core);
 				clips.push(MontageClip {
 					filename,
 					stream_index,
 					in_time,
 					out_time,
 					media_in,
-					gain: 1.0,
+					gain: audio.gain,
+					pan: audio.pan,
+					fade_in: audio.fade_in,
+					fade_out: audio.fade_out,
 					effects: clip_effects(project, *block_id, time),
+					audio_effects: audio.effects,
 				});
 			}
 		}
@@ -301,14 +306,19 @@ pub(crate) fn single_track_video_montage(
 		let Some((filename, stream_index)) = preview_media(footage) else {
 			continue;
 		};
+		let audio = MontageAudio::from_block_core(&clip.core);
 		clips.push(MontageClip {
 			filename,
 			stream_index,
 			in_time,
 			out_time,
 			media_in: clip.core.media_in,
-			gain: 1.0,
+			gain: audio.gain,
+			pan: audio.pan,
+			fade_in: audio.fade_in,
+			fade_out: audio.fade_out,
 			effects: clip_effects(project, *block_id, time),
+			audio_effects: audio.effects,
 		});
 	}
 	clips

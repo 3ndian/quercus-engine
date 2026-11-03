@@ -8,7 +8,7 @@ use quercus_node::project::Project;
 use quercus_node::sequence::SequenceBehavior;
 use quercus_node::track::{TrackBehavior, TrackListBehavior, TrackType};
 use quercus_render::manager::RenderManager;
-use quercus_render::ticket::{AudioTicketParams, MontageClip, TicketPayload};
+use quercus_render::ticket::{AudioTicketParams, MontageAudio, MontageClip, TicketPayload};
 
 use crate::coretypes::QuercusTimeRange;
 use crate::handle::NativeMirror;
@@ -219,14 +219,19 @@ fn audio_montage(project: &Project, sequence: NodeId, range: TimeRange) -> Vec<M
 				let Some((filename, stream_index)) = preview_media(footage) else {
 					continue;
 				};
+				let audio = MontageAudio::from_block_core(&clip.core);
 				clips.push(MontageClip {
 					filename,
 					stream_index,
 					in_time,
 					out_time,
 					media_in: clip.core.media_in,
-					gain: clip.core.audio_gain.clamp(0.0, 4.0) as f32,
+					gain: audio.gain,
+					pan: audio.pan,
+					fade_in: audio.fade_in,
+					fade_out: audio.fade_out,
 					effects: Vec::new(),
+					audio_effects: audio.effects,
 				});
 			}
 		}
@@ -264,15 +269,22 @@ pub(crate) fn render_audio(
 				.and_then(|behavior| behavior.downcast_ref::<FootageBehavior>())
 				.ok_or("audio viewer is not footage")?;
 			let (filename, stream_index) = preview_media(footage).ok_or("footage has no audio")?;
-			vec![MontageClip {
-				filename,
-				stream_index,
-				in_time: range.in_(),
-				out_time: range.out(),
-				media_in: range.in_(),
-				gain: 1.0,
-				effects: Vec::new(),
-			}]
+			{
+				let audio = MontageAudio::default();
+				vec![MontageClip {
+					filename,
+					stream_index,
+					in_time: range.in_(),
+					out_time: range.out(),
+					media_in: range.in_(),
+					gain: audio.gain,
+					pan: audio.pan,
+					fade_in: audio.fade_in,
+					fade_out: audio.fade_out,
+					effects: Vec::new(),
+					audio_effects: audio.effects,
+				}]
+			}
 		}
 	};
 	let params = AudioTicketParams {

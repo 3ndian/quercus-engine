@@ -469,7 +469,11 @@ fn montage_effects_render_through_the_worker() {
 		out_time: Rational::new(10, 1),
 		media_in: Rational::new(0, 1),
 		gain: 1.0,
+		pan: 0.0,
+		fade_in: Rational::new(0, 1),
+		fade_out: Rational::new(0, 1),
 		effects,
+		audio_effects: Vec::new(),
 	};
 	let montages = [
 		vec![clip(Vec::new())],

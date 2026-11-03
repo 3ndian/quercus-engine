@@ -42,7 +42,11 @@ fn main() {
 		out_time: Rational::new(end_frame, fps),
 		media_in: Rational::new(0, 1),
 		gain: 1.0,
+		pan: 0.0,
+		fade_in: Rational::new(0, 1),
+		fade_out: Rational::new(0, 1),
 		effects: Vec::new(),
+		audio_effects: Vec::new(),
 	}];
 
 	let mut pcm: Vec<i16> = Vec::new();

@@ -1047,19 +1047,7 @@ impl WorkerSession {
 		let montage: Vec<MontageClip> = spec
 			.montage
 			.iter()
-			.map(|c| MontageClip {
-				filename: c.filename.clone(),
-				stream_index: c.stream_index,
-				in_time: Rational::new(c.in_num, c.in_den),
-				out_time: Rational::new(c.out_num, c.out_den),
-				media_in: Rational::new(c.media_in_num, c.media_in_den),
-				gain: c.gain,
-				effects: c
-					.effects
-					.iter()
-					.map(crate::worker::ipc::montage_effect_from)
-					.collect(),
-			})
+			.map(crate::worker::ipc::montage_clip_from)
 			.collect();
 		Ok(AudioTicketParams {
 			viewer: self.graph.as_ref().map(|g| g.project_copy).unwrap_or(0),
@@ -1232,19 +1220,7 @@ impl WorkerSession {
 		let montage: Vec<MontageClip> = spec
 			.montage
 			.iter()
-			.map(|c| MontageClip {
-				filename: c.filename.clone(),
-				stream_index: c.stream_index,
-				in_time: Rational::new(c.in_num, c.in_den),
-				out_time: Rational::new(c.out_num, c.out_den),
-				media_in: Rational::new(c.media_in_num, c.media_in_den),
-				gain: c.gain,
-				effects: c
-					.effects
-					.iter()
-					.map(crate::worker::ipc::montage_effect_from)
-					.collect(),
-			})
+			.map(crate::worker::ipc::montage_clip_from)
 			.collect();
 		let adjustments: Vec<AdjustmentSpan> = spec
 			.adjustments
@@ -2993,6 +2969,12 @@ mod tests {
 				media_in_num: 0,
 				media_in_den: 1,
 				gain: 0.5,
+				pan: 0.0,
+				fade_in_num: 0,
+				fade_in_den: 1,
+				fade_out_num: 0,
+				fade_out_den: 1,
+				audio_effects: vec![],
 				effects: vec![WireMontageEffect {
 					type_id: "org.quercus.gain".to_string(),
 					enabled: true,

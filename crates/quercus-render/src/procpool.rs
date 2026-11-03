@@ -81,7 +81,7 @@ use crate::error::{Error, Result};
 use crate::ipc::{
 	write_message, AudioTicketSpec, BatchAcceptedMsg, BatchTicketSpec, FrameFailedMsg, FrameReadyMsg,
 	FrameSlotMeta, FrameSlotPool, HandshakeMsg, HelloCapsMsg, PluginProgressMsg, RenderAudioBatchMsg,
-	RenderBatchMsg, SharedMemoryRegion, ShmMode, WireMontageClip, SLOT_FORMAT_BGRA8,
+	RenderBatchMsg, SharedMemoryRegion, ShmMode, SLOT_FORMAT_BGRA8,
 	TYPE_BATCH_ACCEPTED, TYPE_ERROR, TYPE_FRAME_FAILED, TYPE_FRAME_READY, TYPE_HANDSHAKE,
 	TYPE_HELLO_CAPS, TYPE_PLUGIN_PROGRESS, TYPE_RENDER_AUDIO_BATCH,
 	plugin_cancel_json,
@@ -2471,18 +2471,7 @@ fn build_ticket_spec(
 	let montage = params
 		.montage
 		.iter()
-		.map(|c| WireMontageClip {
-			filename: c.filename.clone(),
-			stream_index: c.stream_index,
-			in_num: c.in_time.numerator(),
-			in_den: c.in_time.denominator(),
-			out_num: c.out_time.numerator(),
-			out_den: c.out_time.denominator(),
-			media_in_num: c.media_in.numerator(),
-			media_in_den: c.media_in.denominator(),
-			gain: c.gain,
-			effects: c.effects.iter().map(crate::ipc::wire_effect_from).collect(),
-		})
+		.map(crate::ipc::wire_montage_clip_from)
 		.collect();
 	BatchTicketSpec {
 		ticket,
@@ -2517,18 +2506,7 @@ fn build_audio_ticket_spec(ticket: i64, slot: u32, params: &AudioTicketParams) -
 	let montage = params
 		.montage
 		.iter()
-		.map(|c| WireMontageClip {
-			filename: c.filename.clone(),
-			stream_index: c.stream_index,
-			in_num: c.in_time.numerator(),
-			in_den: c.in_time.denominator(),
-			out_num: c.out_time.numerator(),
-			out_den: c.out_time.denominator(),
-			media_in_num: c.media_in.numerator(),
-			media_in_den: c.media_in.denominator(),
-			gain: c.gain,
-			effects: c.effects.iter().map(crate::ipc::wire_effect_from).collect(),
-		})
+		.map(crate::ipc::wire_montage_clip_from)
 		.collect();
 	AudioTicketSpec {
 		ticket,
@@ -4366,7 +4344,11 @@ mod tests {
 				out_time: quercus_core::Rational::new(3, 4),
 				media_in: quercus_core::Rational::new(0, 1),
 				gain: 0.5,
+				pan: 0.0,
+				fade_in: quercus_core::Rational::new(0, 1),
+				fade_out: quercus_core::Rational::new(0, 1),
 				effects: Vec::new(),
+				audio_effects: Vec::new(),
 			}],
 		};
 		let spec = build_audio_ticket_spec(5, 2, &params);

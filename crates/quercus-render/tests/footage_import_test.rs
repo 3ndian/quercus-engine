@@ -356,7 +356,11 @@ fn montage_native_size_with_host_gpu_composites_the_clip() {
 			out_time: Rational::new(10, 1),
 			media_in: Rational::new(0, 1),
 			gain: 1.0,
+			pan: 0.0,
+			fade_in: Rational::new(0, 1),
+			fade_out: Rational::new(0, 1),
 			effects: Vec::new(),
+			audio_effects: Vec::new(),
 		}],
 		adjustments: Vec::new(),
 	};
