@@ -2649,9 +2649,9 @@ fn process_clip_audio(
     // -3 dB-centre constant-power law, which would make every default
     // stereo clip 3 dB quieter.
     let (left_pan, right_pan) = if pan > 0.0 {
-        (1.0, (pan * std::f64::consts::FRAC_PI_2).cos())
+        ((pan * std::f64::consts::FRAC_PI_2).cos(), 1.0)
     } else if pan < 0.0 {
-        ((-pan * std::f64::consts::FRAC_PI_2).cos(), 1.0)
+        (1.0, (-pan * std::f64::consts::FRAC_PI_2).cos())
     } else {
         (1.0, 1.0)
     };
