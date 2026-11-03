@@ -65,6 +65,26 @@ impl Default for QuercusSubtitleStyle {
 }
 
 impl QuercusSubtitleStyle {
+	/// Builds the POD style from the engine style.
+	fn from_native(style: &ops::SubtitleStyle) -> Self {
+		let mut font_family = [0u8; 128];
+		let bytes = style.font_family.as_bytes();
+		let length = bytes.len().min(font_family.len() - 1);
+		font_family[..length].copy_from_slice(&bytes[..length]);
+		Self {
+			font_family,
+			font_size: style.font_size,
+			color: style.color,
+			outline_color: style.outline_color,
+			outline_enabled: style.outline_enabled,
+			outline_width: style.outline_width,
+			align: style.align,
+			margin_h: style.margin_h,
+			margin_v: style.margin_v,
+			line_spacing: style.line_spacing,
+		}
+	}
+
 	/// Converts the POD style into the engine command style, rejecting a
 	/// missing NUL terminator and invalid UTF-8 in `font_family`.
 	fn to_native(&self) -> Result<ops::SubtitleStyle, String> {
@@ -237,6 +257,31 @@ pub unsafe extern "C" fn quercus_editor_set_clip_gain(
 	};
 	let project = session.project();
 	crate::editor_commands::set_clip_gain(&project, clip, gain).is_ok()
+}
+
+/// Reads the subtitle style applied to a Text clip. Returns false for a
+/// null/invalid session or a non-Text clip.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_subtitle_style(
+	session: *const EditorSessionHandle,
+	clip: u64,
+	out: *mut QuercusSubtitleStyle,
+) -> bool {
+	let (Some(session), Some(clip), Some(out)) = (
+		unsafe { session.as_ref() },
+		NodeId::from_identity(clip),
+		unsafe { out.as_mut() },
+	) else {
+		return false;
+	};
+	let project = session.project();
+	match ops::read_subtitle_style(&project, clip) {
+		Some(style) => {
+			*out = QuercusSubtitleStyle::from_native(&style);
+			true
+		}
+		None => false,
+	}
 }
 
 #[cfg(test)]

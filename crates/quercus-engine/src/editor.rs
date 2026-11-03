@@ -12,6 +12,7 @@ pub mod notify;
 pub mod proxy;
 pub mod sync;
 pub mod multicam;
+pub mod audio;
 pub mod subtitles;
 
 use quercus_core::handle::CHandle;

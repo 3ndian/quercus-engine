@@ -498,6 +498,8 @@ mod media;
 pub mod proxy;
 pub mod sync;
 pub mod multicam;
+mod audio;
+pub use audio::*;
 mod subtitles;
 pub use snapshot::*;
 pub use graph::*;
@@ -923,6 +925,11 @@ mod subtitle_roundtrip_tests {
 				.pod
 				.expect("color pod");
 			assert_eq!(color.f, [1.0, 0.25, 0.0, 1.0]);
+			let read = session.subtitle_style(clip.id).expect("read style");
+			assert_eq!(read.font_family, "DejaVu Sans");
+			assert_eq!(read.font_size, 48.0);
+			assert_eq!(read.color, [1.0, 0.25, 0.0, 1.0]);
+			assert_eq!(read.align, 2);
 			let outline = params
 				.get("outline_enabled_in")
 				.expect("outline enabled")
@@ -1056,6 +1063,14 @@ mod clip_audio_post_tests {
 		));
 		assert!(session.set_clip_audio_effect_param(clip, 1, "panning_in", 0.5));
 		assert!(session.set_clip_audio_effect_enabled(clip, 1, false));
+		let state = session.clip_audio(clip).expect("clip audio state");
+		assert!((state.gain - 0.5).abs() < 1e-9);
+		assert!((state.pan + 0.5).abs() < 1e-9);
+		assert_eq!(state.fade_in, Rational::new(1, 2));
+		assert_eq!(state.fade_out, Rational::new(1, 4));
+		assert_eq!(state.effects.len(), 2);
+		assert_eq!(state.effects[0].volume, Some(0.25));
+		assert!(!state.effects[1].enabled);
 		assert!(session.remove_clip_audio_effect(clip, 1));
 
 		// Invalid values come back as false.

@@ -655,3 +655,46 @@ mod tests {
 		let _ = std::fs::remove_file(output);
 	}
 }
+
+/// Reads the style currently applied to `clip`'s Text source.
+pub fn read_subtitle_style(project: &ProjectRef, clip: NodeId) -> Option<SubtitleStyle> {
+	let guard = lock(project);
+	let source = guard
+		.graph
+		.connected_output(clip, clip_input::TEXTURE_INPUT, -1)?;
+	if guard.graph.get(source)?.behavior.type_id() != "org.olivevideoeditor.Olive.text3" {
+		return None;
+	}
+	let standard = |input: &str| {
+		guard
+			.graph
+			.get(source)
+			.map(|entry| entry.core.standard_value(input, -1))
+	};
+	let mut style = SubtitleStyle::default();
+	if let Some(value) = standard("font_family_in") {
+		style.font_family = match &value {
+			NodeValue::StrCombo(text) | NodeValue::Text(text) => text.clone(),
+			_ => style.font_family,
+		};
+	}
+	if let Some(NodeValue::Float(size)) = standard("font_size_in") {
+		style.font_size = size as f32;
+	}
+	if let Some(NodeValue::Color(color)) = standard("color_in") {
+		style.color = color;
+	}
+	if let Some(NodeValue::Boolean(enabled)) = standard("outline_enabled_in") {
+		style.outline_enabled = enabled;
+	}
+	if let Some(NodeValue::Color(color)) = standard("outline_color_in") {
+		style.outline_color = color;
+	}
+	if let Some(NodeValue::Float(width)) = standard("outline_width_in") {
+		style.outline_width = width as f32;
+	}
+	if let Some(NodeValue::Combo(align)) = standard("valign_in") {
+		style.align = align as i32;
+	}
+	Some(style)
+}

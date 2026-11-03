@@ -64,6 +64,26 @@ impl Default for SubtitleStyle {
 impl SubtitleStyle {
 	/// Builds the POD C value, rejecting a font family that does not fit the
 	/// 128-byte NUL-terminated field.
+	fn from_raw(raw: &QuercusSubtitleStyle) -> Self {
+		let end = raw
+			.font_family
+			.iter()
+			.position(|&byte| byte == 0)
+			.unwrap_or(raw.font_family.len());
+		SubtitleStyle {
+			font_family: String::from_utf8_lossy(&raw.font_family[..end]).into_owned(),
+			font_size: raw.font_size,
+			color: raw.color,
+			outline_color: raw.outline_color,
+			outline_enabled: raw.outline_enabled,
+			outline_width: raw.outline_width,
+			align: raw.align,
+			margin_h: raw.margin_h,
+			margin_v: raw.margin_v,
+			line_spacing: raw.line_spacing,
+		}
+	}
+
 	fn to_raw(&self) -> Option<QuercusSubtitleStyle> {
 		let bytes = self.font_family.as_bytes();
 		if bytes.len() >= 128 || bytes.contains(&0) {
@@ -109,6 +129,11 @@ struct QuercusSubtitleStyle {
 #[cfg_attr(not(windows), link(name = "quercus_engine", kind = "dylib"))]
 unsafe extern "C" {
 	fn quercus_editor_subtitle_style_default() -> QuercusSubtitleStyle;
+	fn quercus_editor_subtitle_style(
+		session: *const c_void,
+		clip: u64,
+		out: *mut QuercusSubtitleStyle,
+	) -> bool;
 	fn quercus_editor_set_subtitle_style(
 		session: *const c_void,
 		clip: u64,
@@ -144,6 +169,14 @@ impl EditorSession {
 			margin_v: raw.margin_v,
 			line_spacing: raw.line_spacing,
 		}
+	}
+
+	/// Reads the style applied to `clip`'s Text source, or `None` when the
+	/// clip has no Text generator.
+	pub fn subtitle_style(&self, clip: NodeId) -> Option<SubtitleStyle> {
+		let mut raw = unsafe { quercus_editor_subtitle_style_default() };
+		unsafe { quercus_editor_subtitle_style(self.ptr, clip.raw(), &mut raw) }
+			.then(|| SubtitleStyle::from_raw(&raw))
 	}
 
 	/// Applies `style` to the Text clip `clip` as one undoable edit.
