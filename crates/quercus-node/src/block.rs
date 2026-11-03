@@ -30,11 +30,34 @@ pub const AUDIO_EFFECT_VOLUME_TYPE_ID: &str = "org.olivevideoeditor.Olive.volume
 /// Pan effect type id (matches `nodes::pan::PanNode::type_id`).
 pub const AUDIO_EFFECT_PAN_TYPE_ID: &str = "org.olivevideoeditor.Olive.pan";
 
+/// Three-band EQ effect type id (built into the clip mixer).
+pub const AUDIO_EFFECT_EQ_TYPE_ID: &str = "org.olivevideoeditor.Olive.eq";
+
+/// Dynamics compressor effect type id (built into the clip mixer).
+pub const AUDIO_EFFECT_COMPRESSOR_TYPE_ID: &str = "org.olivevideoeditor.Olive.compressor";
+
 /// Volume effect parameter input id (`volume_in`).
 pub const AUDIO_VOLUME_INPUT: &str = "volume_in";
 
 /// Pan effect parameter input id (`panning_in`).
 pub const AUDIO_PAN_INPUT: &str = "panning_in";
+
+/// EQ low-band gain in dB.
+pub const AUDIO_EQ_LOW_GAIN_INPUT: &str = "low_gain_db";
+/// EQ mid-band gain in dB.
+pub const AUDIO_EQ_MID_GAIN_INPUT: &str = "mid_gain_db";
+/// EQ high-band gain in dB.
+pub const AUDIO_EQ_HIGH_GAIN_INPUT: &str = "high_gain_db";
+/// Compressor threshold in dBFS.
+pub const AUDIO_COMP_THRESHOLD_INPUT: &str = "threshold_db";
+/// Compressor ratio (n:1).
+pub const AUDIO_COMP_RATIO_INPUT: &str = "ratio";
+/// Compressor attack in milliseconds.
+pub const AUDIO_COMP_ATTACK_INPUT: &str = "attack_ms";
+/// Compressor release in milliseconds.
+pub const AUDIO_COMP_RELEASE_INPUT: &str = "release_ms";
+/// Compressor makeup gain in dB.
+pub const AUDIO_COMP_MAKEUP_INPUT: &str = "makeup_db";
 
 /// One entry of a clip's audio effect chain.
 ///

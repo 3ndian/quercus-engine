@@ -2695,6 +2695,95 @@ fn process_clip_audio(
 /// the mixer uses the same `process_samples` kernels as the node graph
 /// instead of re-implementing them. Disabled effects are bypassed; an
 /// unknown type id passes the chunk through with a one-shot warning.
+/// Read a scalar effect parameter with a finite fallback.
+fn effect_param(effect: &crate::ticket::MontageAudioEffect, input: &str, default: f64) -> f64 {
+    effect
+        .param(input)
+        .map(|value| value.to_double())
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+}
+
+/// Three-band EQ: one-pole low/high split with per-band dB gains.
+fn apply_eq(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    effect: &crate::ticket::MontageAudioEffect,
+    rate: f64,
+) {
+    let rate = rate.max(1.0);
+    let gain = |input: &str| {
+        10f64.powf(effect_param(effect, input, 0.0).clamp(-24.0, 24.0) / 20.0) as f32
+    };
+    let low_gain = gain(quercus_node::block::AUDIO_EQ_LOW_GAIN_INPUT);
+    let mid_gain = gain(quercus_node::block::AUDIO_EQ_MID_GAIN_INPUT);
+    let high_gain = gain(quercus_node::block::AUDIO_EQ_HIGH_GAIN_INPUT);
+    let low_alpha = (1.0 - (-std::f64::consts::TAU * 200.0 / rate).exp()) as f32;
+    let high_alpha = (1.0 - (-std::f64::consts::TAU * 4_000.0 / rate).exp()) as f32;
+    let mut low = vec![0.0f32; channels];
+    let mut high_lp = vec![0.0f32; channels];
+    for frame in 0..frames {
+        for channel in 0..channels {
+            let x = buf[frame * channels + channel];
+            low[channel] += low_alpha * (x - low[channel]);
+            high_lp[channel] += high_alpha * (x - high_lp[channel]);
+            let low_band = low[channel];
+            let high_band = x - high_lp[channel];
+            let mid_band = x - low_band - high_band;
+            buf[frame * channels + channel] =
+                low_band * low_gain + mid_band * mid_gain + high_band * high_gain;
+        }
+    }
+}
+
+/// Feed-forward compressor with a sample-peak detector and exponential
+/// attack/release smoothing.
+fn apply_compressor(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    effect: &crate::ticket::MontageAudioEffect,
+    rate: f64,
+) {
+    let rate = rate.max(1.0);
+    let threshold = effect_param(effect, quercus_node::block::AUDIO_COMP_THRESHOLD_INPUT, -24.0)
+        .clamp(-80.0, 0.0);
+    let ratio = effect_param(effect, quercus_node::block::AUDIO_COMP_RATIO_INPUT, 4.0)
+        .clamp(1.0, 40.0);
+    let attack_ms = effect_param(effect, quercus_node::block::AUDIO_COMP_ATTACK_INPUT, 10.0)
+        .clamp(0.1, 1_000.0);
+    let release_ms = effect_param(effect, quercus_node::block::AUDIO_COMP_RELEASE_INPUT, 100.0)
+        .clamp(1.0, 5_000.0);
+    let makeup = 10f64.powf(
+        effect_param(effect, quercus_node::block::AUDIO_COMP_MAKEUP_INPUT, 0.0)
+            .clamp(-24.0, 24.0)
+            / 20.0,
+    ) as f32;
+    let attack = (-1.0f64 / (rate * attack_ms / 1_000.0)).exp() as f32;
+    let release = (-1.0f64 / (rate * release_ms / 1_000.0)).exp() as f32;
+    let mut envelope = 1.0f32;
+    for frame in 0..frames {
+        let mut peak = 0.0f32;
+        for channel in 0..channels {
+            peak = peak.max(buf[frame * channels + channel].abs());
+        }
+        let peak_db = 20.0 * (peak.max(1e-9) as f64).log10();
+        let target_db = if peak_db > threshold {
+            threshold + (peak_db - threshold) / ratio
+        } else {
+            peak_db
+        };
+        let target = 10f32.powf(((target_db - peak_db) / 20.0) as f32);
+        let coeff = if target < envelope { attack } else { release };
+        envelope = coeff * envelope + (1.0 - coeff) * target;
+        let gain = envelope * makeup;
+        for channel in 0..channels {
+            buf[frame * channels + channel] *= gain;
+        }
+    }
+}
+
 fn apply_audio_effect(
     buf: &mut [f32],
     frames: usize,
@@ -2703,6 +2792,14 @@ fn apply_audio_effect(
     rate: f64,
 ) {
     if !effect.enabled {
+        return;
+    }
+    if effect.type_id == quercus_node::block::AUDIO_EFFECT_EQ_TYPE_ID {
+        apply_eq(buf, frames, channels, effect, rate);
+        return;
+    }
+    if effect.type_id == quercus_node::block::AUDIO_EFFECT_COMPRESSOR_TYPE_ID {
+        apply_compressor(buf, frames, channels, effect, rate);
         return;
     }
     let (param_input, default) = match effect.type_id.as_str() {
@@ -5509,6 +5606,64 @@ mod tests {
         run_clip_audio(&mut buf, 1, &clip, 0.5, 4);
         assert!((buf[0] - 0.5).abs() < 1e-6);
         assert!((buf[1] - 0.75).abs() < 1e-6);
+    }
+
+    fn audio_param_effect(
+        type_id: &str,
+        params: &[(&str, f64)],
+    ) -> crate::ticket::MontageAudioEffect {
+        crate::ticket::MontageAudioEffect {
+            type_id: type_id.to_string(),
+            enabled: true,
+            params: params
+                .iter()
+                .map(|(input, value)| (input.to_string(), NodeValue::Float(*value)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn eq_and_compressor_process_the_clip_buffer() {
+        // A DC/low-frequency signal is boosted by a +12 dB low band.
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![audio_param_effect(
+                quercus_node::block::AUDIO_EFFECT_EQ_TYPE_ID,
+                &[(quercus_node::block::AUDIO_EQ_LOW_GAIN_INPUT, 12.0)],
+            )],
+        );
+        let mut buf = vec![0.5f32; 4800];
+        run_clip_audio(&mut buf, 1, &clip, 0.0, 48000);
+        assert!(
+            buf.last().copied().unwrap() > 0.5,
+            "low-band boost must raise a low-frequency signal"
+        );
+
+        // A 0 dBFS signal is reduced by a -20 dB / 4:1 compressor.
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![audio_param_effect(
+                quercus_node::block::AUDIO_EFFECT_COMPRESSOR_TYPE_ID,
+                &[
+                    (quercus_node::block::AUDIO_COMP_THRESHOLD_INPUT, -20.0),
+                    (quercus_node::block::AUDIO_COMP_RATIO_INPUT, 4.0),
+                    (quercus_node::block::AUDIO_COMP_ATTACK_INPUT, 0.1),
+                    (quercus_node::block::AUDIO_COMP_RELEASE_INPUT, 10.0),
+                ],
+            )],
+        );
+        let mut buf = vec![1.0f32; 4800];
+        run_clip_audio(&mut buf, 1, &clip, 0.0, 48000);
+        assert!(
+            buf.last().copied().unwrap() < 0.9,
+            "compressor must reduce a 0 dBFS signal"
+        );
     }
 
     /// The chain applies Volume then Pan in the stored order. (Both are

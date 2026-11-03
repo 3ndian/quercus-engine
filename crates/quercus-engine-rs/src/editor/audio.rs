@@ -17,6 +17,8 @@ pub struct ClipAudioEffect {
 	pub volume: Option<f64>,
 	/// Static Pan value, when the entry carries one.
 	pub pan: Option<f64>,
+	/// All static scalar parameters the entry carries, keyed by input id.
+	pub params: Vec<(String, f64)>,
 }
 
 /// Per-clip audio mix state.
@@ -126,11 +128,41 @@ impl EditorSession {
 				}
 				.then_some(value)
 			};
+			let inputs: &[&str] = match type_id.as_str() {
+				"org.olivevideoeditor.Olive.volume" => &["volume_in"],
+				"org.olivevideoeditor.Olive.pan" => &["panning_in"],
+				"org.olivevideoeditor.Olive.eq" => {
+					&["low_gain_db", "mid_gain_db", "high_gain_db"]
+				}
+				"org.olivevideoeditor.Olive.compressor" => &[
+					"threshold_db",
+					"ratio",
+					"attack_ms",
+					"release_ms",
+					"makeup_db",
+				],
+				_ => &[],
+			};
+			let mut params = Vec::new();
+			for input in inputs {
+				if let Some(value) = get(input) {
+					params.push((input.to_string(), value));
+				}
+			}
+			let volume = params
+				.iter()
+				.find(|(input, _)| input == "volume_in")
+				.map(|(_, value)| *value);
+			let pan = params
+				.iter()
+				.find(|(input, _)| input == "panning_in")
+				.map(|(_, value)| *value);
 			effects.push(ClipAudioEffect {
 				type_id,
 				enabled: info.enabled,
-				volume: get("volume_in"),
-				pan: get("panning_in"),
+				volume,
+				pan,
+				params,
 			});
 		}
 		Some(ClipAudioState {
