@@ -2609,7 +2609,7 @@ pub fn audio_samples_byte_len(params: &crate::ticket::AudioTicketParams) -> Resu
 
 /// Apply one clip's audio parameters to a decoded interleaved chunk.
 ///
-/// Order (audio-post Phase 1): per-frame gain, constant-power stereo pan
+/// Order (audio-post Phase 1): per-frame gain, stereo balance pan
 /// (-3 dB at centre), linear fade-in/fade-out anchored at the clip's
 /// timeline in/out, then the clip's audio effect chain in source-first
 /// order. `first_time` is the absolute sequence time (seconds) of frame 0;
@@ -2636,10 +2636,19 @@ fn process_clip_audio(
     } else {
         0.0
     };
-    // Constant-power pan law: centre (0) is -3 dB on both channels,
-    // hard left/right isolate one channel.
-    let theta = (pan + 1.0) * std::f64::consts::FRAC_PI_4;
-    let (left_pan, right_pan) = (theta.cos(), theta.sin());
+    // Stereo balance law: centre (0) is unity on both channels (so the
+    // default clip is not quieter than the old gain-only path); panning
+    // attenuates the opposite channel with a cosine taper and isolates it
+    // completely at hard left/right. This is intentionally not the
+    // -3 dB-centre constant-power law, which would make every default
+    // stereo clip 3 dB quieter.
+    let (left_pan, right_pan) = if pan > 0.0 {
+        (1.0, (pan * std::f64::consts::FRAC_PI_2).cos())
+    } else if pan < 0.0 {
+        ((-pan * std::f64::consts::FRAC_PI_2).cos(), 1.0)
+    } else {
+        (1.0, 1.0)
+    };
     let in_time = clip.in_time.to_f64();
     let out_time = clip.out_time.to_f64();
     let fade_in = clip.fade_in.to_f64();
@@ -5431,18 +5440,15 @@ mod tests {
         process_clip_audio(buf, frames, channels, clip, first_time, rate);
     }
 
-    /// Gain 1.0 at pan centre uses the constant-power law: both stereo
-    /// channels land at 0.7071 (-3 dB).
+    /// Gain 1.0 at pan centre is unity on both stereo channels; the
+    /// balance law must not make the default clip quieter.
     #[test]
-    fn clip_gain_at_pan_centre_is_minus_three_db() {
+    fn clip_gain_at_pan_centre_is_unity() {
         let clip = audio_test_clip(1.0, 0.0, Rational::new(0, 1), Rational::new(0, 1), Vec::new());
         let mut buf = vec![1.0f32; 2];
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
         for sample in buf {
-            assert!(
-                (sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
-                "centre pan is -3 dB, got {sample}"
-            );
+            assert!((sample - 1.0).abs() < 1e-6, "centre pan is unity, got {sample}");
         }
 
         // Gain is applied on top of the pan law.
@@ -5450,10 +5456,7 @@ mod tests {
         let mut buf = vec![1.0f32; 2];
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
         for sample in buf {
-            assert!(
-                (sample - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
-                "gain multiplies the pan law, got {sample}"
-            );
+            assert!((sample - 0.5).abs() < 1e-6, "gain multiplies centre, got {sample}");
         }
     }
 
@@ -5523,9 +5526,9 @@ mod tests {
         );
         let mut buf = vec![1.0f32; 2];
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
-        // Centre base pan 0.7071, Volume 0.5 (both), Pan +0.5 halves left.
-        assert!((buf[0] - 0.5 * 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
-        assert!((buf[1] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        // Centre base pan unity, Volume 0.5 (both), Pan +0.5 halves left.
+        assert!((buf[0] - 0.25).abs() < 1e-6);
+        assert!((buf[1] - 0.5).abs() < 1e-6);
 
         // Swapping the entries still applies both (the kernels commute).
         let clip = audio_test_clip(
@@ -5537,8 +5540,8 @@ mod tests {
         );
         let mut buf = vec![1.0f32; 2];
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
-        assert!((buf[0] - 0.5 * 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
-        assert!((buf[1] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!((buf[0] - 0.25).abs() < 1e-6);
+        assert!((buf[1] - 0.5).abs() < 1e-6);
     }
 
     /// Disabled effects are bypassed and an unknown type id passes the
@@ -5557,7 +5560,7 @@ mod tests {
         let mut buf = vec![1.0f32; 2];
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
         for sample in &buf {
-            assert!((*sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+            assert!((*sample - 1.0).abs() < 1e-6);
         }
 
         let unknown = crate::ticket::MontageAudioEffect {
@@ -5576,7 +5579,7 @@ mod tests {
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
         for sample in &buf {
             assert!(
-                (*sample - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+                (*sample - 0.5).abs() < 1e-6,
                 "unknown effect passes through, later effects still run"
             );
         }
@@ -5608,10 +5611,9 @@ mod tests {
         );
         let mut buf = vec![1.0f32; 2];
         run_clip_audio(&mut buf, 2, &clip, 0.0, 48000);
-        // Volume 1.0 leaves the -3 dB centre; Pan 0.0 leaves the buffer
-        // untouched in the node kernel.
+        // Volume 1.0 and Pan 0.0 leave the centre untouched.
         for sample in &buf {
-            assert!((*sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+            assert!((*sample - 1.0).abs() < 1e-6);
         }
     }
 
