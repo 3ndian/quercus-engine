@@ -9,8 +9,8 @@ license = "GPL-3.0-or-later"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-quercus-core = { version = "=0.5.2", path = "../quercus-core" }
-quercus-undo = { version = "=0.5.2", path = "../quercus-undo" }
-quercus-node = { version = "=0.5.2", path = "../quercus-node" }
+quercus-core = { version = "=0.6.0", path = "../quercus-core" }
+quercus-undo = { version = "=0.6.0", path = "../quercus-undo" }
+quercus-node = { version = "=0.6.0", path = "../quercus-node" }
 # Error trait derive for the crate-internal error enum.
 thiserror = "2"

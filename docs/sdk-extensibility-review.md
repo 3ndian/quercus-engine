@@ -1,6 +1,6 @@
 # SDK 可替换性评审：哪些组件该让调用者换掉
 
-> 审计对象：`quercus-engine` workspace 0.5.2（公开面 = C ABI `quercus-engine` + 安全 SDK `quercus-engine-rs`）。
+> 审计对象：`quercus-engine` workspace 0.6.0（公开面 = C ABI `quercus-engine` + 安全 SDK `quercus-engine-rs`）。
 > 方法：只读源码审计，未运行 `cargo build/test`（本机缺少项目 FFmpeg 工具链）。所有结论给出 `file:line`；标 **推断** 的是静态推理，未做运行验证。
 > 明细审计记录见 `review/parts/{storage,boundary,pipeline,runtime}.md`。
 > 状态更新（2026-10-31）：**P0-A（字节 ABI）、P0-B（传输 vtable 注册）、P0-C（库/写穿走注册表）均已落地**，

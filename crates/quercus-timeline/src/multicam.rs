@@ -319,6 +319,13 @@ impl MultiCamEnableCommand {
 		}
 		let project = self.sequence.project.clone();
 		for clip in &self.clips {
+			// Defense in depth: an already-enabled clip keeps its multicam;
+			// wrapping it again would nest a second node. Skipped clips push
+			// no state, and redo/undo only walk `state`, so the two lists
+			// need not be index-aligned.
+			if clip_find_multicam(clip).is_some() {
+				continue;
+			}
 			let mc = {
 				let (core, behavior) = quercus_node::nodes::multicamnode::create();
 				let mut p = project

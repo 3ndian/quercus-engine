@@ -9,12 +9,12 @@ license = "GPL-3.0-or-later"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-quercus-core = { version = "0.5", path = "../quercus-core" }
+quercus-core = { version = "0.6", path = "../quercus-core" }
 # Direct Rust calls (single-lib unification): the decode bridge calls
 # quercuscodec's ffi, the node bridge calls quercusnode's ffi. Both directions
 # are acyclic (quercuscodec → quercuscore-rs/quercus-ffmpeg-link; quercusnode → quercuscodec).
-quercus-codec = { version = "=0.5.2", path = "../quercus-codec" }
-quercus-node = { version = "=0.5.2", path = "../quercus-node" }
+quercus-codec = { version = "=0.6.0", path = "../quercus-codec" }
+quercus-node = { version = "=0.6.0", path = "../quercus-node" }
 # wgpu: portable GPU backend (Metal/Vulkan/GL/DX12 in one safe API) — the
 # direct replacement for the C++ libquercusgl2/libquercusvulkan backend plugins.
 # Version 29 matches gpui_wgpu's device (M2 zero-copy present).

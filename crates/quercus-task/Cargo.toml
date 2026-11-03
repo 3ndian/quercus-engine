@@ -18,22 +18,22 @@ crate-type = ["staticlib", "rlib"]
 real-quercusrender = []
 
 [dependencies]
-quercus-core = { version = "=0.5.2", path = "../quercus-core" }
-quercus-undo = { version = "=0.5.2", path = "../quercus-undo" }
-quercus-codec = { version = "=0.5.2", path = "../quercus-codec" }
-quercus-node = { version = "=0.5.2", path = "../quercus-node" }
+quercus-core = { version = "=0.6.0", path = "../quercus-core" }
+quercus-undo = { version = "=0.6.0", path = "../quercus-undo" }
+quercus-codec = { version = "=0.6.0", path = "../quercus-codec" }
+quercus-node = { version = "=0.6.0", path = "../quercus-node" }
 
 # Pure-Rust OpenTimelineIO JSON binding (serde model of the OTIO JSON format
 # covering exactly the object graph the C++ loadotio/saveotio tasks use).
 # Registered in README decision #6: OTIO no longer stays on the C++ side —
 # LoadOTIOTask/SaveOTIOTask parse/serialize through this crate.
-quercus-otio = { version = "=0.5.2", path = "../quercus-otio" }
+quercus-otio = { version = "=0.6.0", path = "../quercus-otio" }
 
 # quercusrender is a regular path dependency (single-lib: the direct ticket
 # arena in `quercusrender::ticket` will back the render loop once the
 # CHandle-based loop is rewired; until then `src/stubs.rs` stands in for
 # the deleted ticket C ABI). The `real-quercusrender` marker feature keeps the
 # old render-real integration test's cargo invocation parsing (see above).
-quercus-render = { version = "=0.5.2", path = "../quercus-render" }
+quercus-render = { version = "=0.6.0", path = "../quercus-render" }
 # Error trait derive for the crate-internal error enum.
 thiserror = "2"

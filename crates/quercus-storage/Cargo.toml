@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-quercus-core = { version = "=0.5.2", path = "../quercus-core" }
+quercus-core = { version = "=0.6.0", path = "../quercus-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # Timestamp columns in the database schema (plan M13 §1: TIMESTAMP NOT
@@ -22,9 +22,9 @@ thiserror = "2"
 # The node graph engine: project + serializer families power the ove-xml
 # backend; the sequence/track/block model powers the otio interchange
 # (see src/bridge/node.rs — direct Rust calls, single-lib unification).
-quercus-node = { version = "=0.5.2", path = "../quercus-node" }
+quercus-node = { version = "=0.6.0", path = "../quercus-node" }
 # Native OTIO JSON model (project-local; see src/bindings/quercusotio).
-quercus-otio = { version = "=0.5.2", path = "../quercus-otio" }
+quercus-otio = { version = "=0.6.0", path = "../quercus-otio" }
 # Database backends via SeaORM (sync facade: a private current-thread
 # runtime drives the async API behind the synchronous C ABI; see
 # backends/database.rs). sqlx-postgres + sqlx-sqlite cover PG/SQLite.
@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 # the quercusundo process-wide undo stack's command-success observers, so a
 # recorded command immediately journals every bound project (M14 R1: the
 # former facade-side binding/snapshot/flush logic, now module-owned).
- quercus-undo = { version = "=0.5.2", path = "../quercus-undo" }
+ quercus-undo = { version = "=0.6.0", path = "../quercus-undo" }
 
 [dev-dependencies]
 # quercuscodec is also reachable through quercusnode; the dev-dependency re-entry

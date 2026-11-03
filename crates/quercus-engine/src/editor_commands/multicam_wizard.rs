@@ -21,11 +21,40 @@ pub struct MulticamCreateResult {
 	pub host_clip: NodeId,
 }
 
+/// Converts seconds to a frame timestamp on the `(num, den)` frame-duration
+/// timebase, rounding to the nearest frame. A degenerate pair keeps the
+/// historical 25 fps fallback.
+fn ts_for_seconds(seconds: f64, time_base: (i64, i64)) -> i64 {
+	let fps = if time_base.0 > 0 && time_base.1 > 0 {
+		time_base.1 as f64 / time_base.0 as f64
+	} else {
+		25.0
+	};
+	(seconds.max(0.0) * fps).round() as i64
+}
+
+/// Builds a non-negative range from a second-based offset/duration, snapped
+/// to the sequence timebase and at least one frame long.
+fn range_for_seconds(offset: f64, duration: f64, time_base: (i64, i64)) -> TimeRange {
+	let (num, den) = if time_base.0 > 0 && time_base.1 > 0 {
+		time_base
+	} else {
+		(1, 25)
+	};
+	let in_ts = ts_for_seconds(offset, time_base).max(0);
+	let length_ts = ts_for_seconds(duration, time_base).max(1);
+	TimeRange::new(
+		Rational::new(in_ts * num, den),
+		Rational::new((in_ts + length_ts) * num, den),
+	)
+}
+
 fn build_multicam_sequence(
 	project: &ProjectRef,
 	angles: &[NodeId],
 	offsets: &[f64],
 	name: &str,
+	time_base: (i64, i64),
 ) -> Result<(NodeId, NodeId), String> {
 	if angles.is_empty() {
 		return Err("no angles selected".into());
@@ -97,9 +126,16 @@ fn build_multicam_sequence(
 	let audio_tracks = if has_audio {
 		let (audio_list, _) = make_list(graph, TrackType::Audio);
 		let mut tracks = Vec::new();
-		for _ in angles {
+		for index in 0..angles.len() {
 			let (core, behavior) = TrackBehavior::create();
 			let track = graph.add_node(core, behavior);
+			if let Some(track_behavior) = graph
+				.get_mut(track)
+				.and_then(|entry| entry.behavior.as_any_mut())
+				.and_then(|behavior| behavior.downcast_mut::<TrackBehavior>())
+			{
+				track_behavior.index = index as i32;
+			}
 			if let Some(list) = graph
 				.get_mut(audio_list)
 				.and_then(|entry| entry.behavior.as_any_mut())
@@ -130,12 +166,7 @@ fn build_multicam_sequence(
 			10.0
 		};
 		let audio = footage_behavior.audio_stream_count() > 0;
-		let offset_ticks = (offsets[index].max(0.0) * 25.0).round() as i64;
-		let length_ticks = (duration * 25.0).round().max(1.0) as i64;
-		let range = TimeRange::new(
-			Rational::new(offset_ticks, 25),
-			Rational::new(offset_ticks + length_ticks, 25),
-		);
+		let range = range_for_seconds(offsets[index], duration, time_base);
 		let (core, behavior) = quercus_node::block::clip_create();
 		let clip = graph.add_node(core, behavior);
 		if let Some(clip_behavior) = graph
@@ -243,7 +274,9 @@ pub fn create_multicam_sequence(
 	} else {
 		name.trim()
 	};
-	let (source_sequence, multicam) = build_multicam_sequence(project, angles, offsets, name)?;
+	let time_base = sequence_time_base(&lock(project).graph, host_sequence).unwrap_or((1, 25));
+	let (source_sequence, multicam) =
+		build_multicam_sequence(project, angles, offsets, name, time_base)?;
 	let root = lock(project).root;
 	quercus_task::nodeops::folder_add_child_command(
 		(project.clone(), root),
@@ -260,19 +293,12 @@ pub fn create_multicam_sequence(
 		Some(clip) => clip,
 		None => {
 			let footage = angles[0];
-			let (time_base, duration) = {
-				let guard = lock(project);
-				(
-					sequence_time_base(&guard.graph, host_sequence).unwrap_or((1, 25)),
-					footage_duration_seconds(&guard.graph, footage).unwrap_or(10.0),
-				)
-			};
+			let duration = footage_duration_seconds(&lock(project).graph, footage).unwrap_or(10.0);
 			if track_ids(&lock(project).graph, host_sequence, TrackType::Video).is_empty() {
 				add_track(project, host_sequence, TrackType::Video)?;
 			}
 			let in_ts = rational_to_ts(playhead, time_base).max(0);
-			let fps = time_base.1 as f64 / time_base.0.max(1) as f64;
-			let length = (duration * fps).round().max(1.0) as i64;
+			let length = ts_for_seconds(duration, time_base).max(1);
 			place_footage_clip(
 				project,
 				host_sequence,

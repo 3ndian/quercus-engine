@@ -22,3 +22,5 @@ mod editing;
 pub(crate) use editing::*;
 mod documents;
 pub(crate) use documents::*;
+mod multicam;
+pub(crate) use multicam::*;

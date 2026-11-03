@@ -1,7 +1,7 @@
 [package]
 name = "quercus-engine"
 edition = "2024"
-version = "0.5.3"
+version = "0.6.0"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -32,15 +32,15 @@ docs-only = []
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
-quercus-audio = { version = "=0.5.2", path = "../quercus-audio", optional = true }
-quercus-codec = { version = "=0.5.2", path = "../quercus-codec", optional = true }
-quercus-core = { version = "0.5", path = "../quercus-core", optional = true }
-quercus-ffmpeg-link = { version = "=0.5.2", path = "../quercus-ffmpeg-link", optional = true }
-quercus-node = { version = "=0.5.2", path = "../quercus-node", optional = true }
-quercus-ofx-plugin = { version = "=0.5.2", path = "../quercus-ofx-plugin", optional = true }
-quercus-otio = { version = "=0.5.2", path = "../quercus-otio", optional = true }
-quercus-render = { version = "0.5", path = "../quercus-render", optional = true }
-quercus-storage = { version = "=0.5.2", path = "../quercus-storage", optional = true }
-quercus-task = { version = "=0.5.2", path = "../quercus-task", optional = true }
-quercus-timeline = { version = "=0.5.2", path = "../quercus-timeline", optional = true }
-quercus-undo = { version = "=0.5.2", path = "../quercus-undo", optional = true }
+quercus-audio = { version = "=0.6.0", path = "../quercus-audio", optional = true }
+quercus-codec = { version = "=0.6.0", path = "../quercus-codec", optional = true }
+quercus-core = { version = "0.6", path = "../quercus-core", optional = true }
+quercus-ffmpeg-link = { version = "=0.6.0", path = "../quercus-ffmpeg-link", optional = true }
+quercus-node = { version = "=0.6.0", path = "../quercus-node", optional = true }
+quercus-ofx-plugin = { version = "=0.6.0", path = "../quercus-ofx-plugin", optional = true }
+quercus-otio = { version = "=0.6.0", path = "../quercus-otio", optional = true }
+quercus-render = { version = "0.6", path = "../quercus-render", optional = true }
+quercus-storage = { version = "=0.6.0", path = "../quercus-storage", optional = true }
+quercus-task = { version = "=0.6.0", path = "../quercus-task", optional = true }
+quercus-timeline = { version = "=0.6.0", path = "../quercus-timeline", optional = true }
+quercus-undo = { version = "=0.6.0", path = "../quercus-undo", optional = true }

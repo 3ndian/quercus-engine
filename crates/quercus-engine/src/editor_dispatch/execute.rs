@@ -550,9 +550,14 @@ pub(crate) fn execute(session: &mut SessionState, command: EditCommand) -> Resul
 			angles,
 			offsets,
 			name,
-		} => primary(
-			ops::create_multicam_sequence(project, id(host_sequence)?, &ids(&angles)?, &offsets, &name)
-				.map(|result| result.source_sequence),
-		),
+		} => {
+			let result =
+				ops::create_multicam_sequence(project, id(host_sequence)?, &ids(&angles)?, &offsets, &name)?;
+			Ok(EditResult {
+				primary: Some(result.source_sequence.identity()),
+				ids: vec![result.host_clip.identity()],
+				..EditResult::default()
+			})
+		}
 	}
 }

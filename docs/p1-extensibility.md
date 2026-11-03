@@ -205,14 +205,14 @@ SDK 不依赖 wgpu；Rust 调用方把 `&wgpu::Device`/`&wgpu::Queue` 转成裸�
 |---|---|
 | `cargo test -p quercus-core --lib debug` | 12 passed |
 | `cargo test -p quercus-render --lib` | 324 passed |
-| `cargo test -p quercus-engine --lib -- --test-threads=1` | 310 passed（含 `ext::*` 适配器测试） |
+| `cargo test -p quercus-engine --lib -- --test-threads=1` | 312 passed（含 `ext::*` 适配器与 multicam 测试） |
 | `cargo test -p quercus-codec --lib` | 195 passed（含内存 WAV 的 provider 端到端） |
 | `cargo test -p quercus-node --lib` | 684 passed |
-| `cargo test -p quercus-engine-rs --lib` | 122 passed |
+| `cargo test -p quercus-engine-rs --lib` | 125 passed |
 | `cargo test -p quercus-storage` | 80 passed（transport 测试随适配器迁入 `engine::ext`） |
 | `cargo test -p quercus-core --lib configstore` | 45 passed |
 | `cargo test -p quercus-engine --lib corestate` | 7 passed |
-| `python3 tooling/gen_c_header.py --check` | 通过（54 structs / 14 enums / 710 functions） |
+| `python3 tooling/gen_c_header.py --check` | 通过（54 structs / 14 enums / 715 functions） |
 | `gcc -std=c11` / `g++ -std=c++17` ABI smoke（新 vtable/日志/字体/缓存调用） | 通过 |
 
 > 环境：SDK/引擎测试使用 `OCIO_SOURCE_DIR=$PWD/target/ocio-probe/src03`（可写的 OCIO 0.3 源码副本）绕过本沙箱只读 registry 的 pystring patch 问题。

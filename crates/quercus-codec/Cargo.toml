@@ -9,8 +9,8 @@ license = "GPL-3.0-or-later"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-quercus-ffmpeg-link = { version = "=0.5.2", path = "../quercus-ffmpeg-link" }
-quercus-core = { version = "=0.5.2", path = "../quercus-core" }
+quercus-ffmpeg-link = { version = "=0.6.0", path = "../quercus-ffmpeg-link" }
+quercus-core = { version = "=0.6.0", path = "../quercus-core" }
 # Real media decode/encode. The C++ ffmpeg_bridge library existed only to
 # absorb FFmpeg API churn; the Rust crate calls ffmpeg-next directly.
 #

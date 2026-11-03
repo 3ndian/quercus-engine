@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 thiserror = "2.0.20"
-ocio-rs = { version = "0.3", features = ["bundled"] }
+ocio-rs = { version = "0.3.0", features = ["bundled"] }
 # wgpu: portable GPU backend — same major as quercus-render's shaderfx/naga
 # generation (29, matching the gpui_wgpu device the app presents with, so
 # the render thread's textures are directly sampleable by the UI).

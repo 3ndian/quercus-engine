@@ -12,7 +12,7 @@ other Quercus crate.
 
 ```toml
 [dependencies]
-quercus-engine-rs = "0.5"
+quercus-engine-rs = "0.6"
 ```
 
 ## Before you build: FFmpeg is mandatory

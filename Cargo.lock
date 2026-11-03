@@ -2649,7 +2649,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quercus-audio"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "cpal",
  "ffmpeg-next",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-codec"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "ffmpeg-next",
  "quercus-core",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-core"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "ash",
  "half",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-engine"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "libc",
  "quercus-audio",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-engine-rs"
-version = "0.5.7"
+version = "0.6.0"
 dependencies = [
  "quercus-engine",
  "thiserror 2.0.21",
@@ -2722,11 +2722,11 @@ dependencies = [
 
 [[package]]
 name = "quercus-ffmpeg-link"
-version = "0.5.2"
+version = "0.6.0"
 
 [[package]]
 name = "quercus-node"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "quercus-codec",
  "quercus-core",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-ofx-plugin"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "cc",
  "quercus-core",
@@ -2748,7 +2748,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-otio"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "quercus-core",
  "quick-xml",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-render"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "cosmic-text",
  "libc",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-storage"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "quercus-core",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-task"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "quercus-codec",
  "quercus-core",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-timeline"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "quercus-core",
  "quercus-node",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "quercus-undo"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "thiserror 2.0.21",
 ]

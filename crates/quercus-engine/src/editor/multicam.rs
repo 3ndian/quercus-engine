@@ -1,8 +1,12 @@
 //! Read-only multicam graph queries for editor sessions.
 
+use quercus_node::graph::Graph;
 use quercus_node::id::NodeId;
+use quercus_node::nodes::multicamnode::{CURRENT_INPUT, MultiCamNode, SEQUENCE_TYPE_INPUT};
+use quercus_node::track::TrackType;
 
 use super::EditorSessionHandle;
+use crate::codec::copy_str_out;
 use crate::coretypes::QuercusRational;
 use crate::editor_commands as ops;
 use crate::handle::NativeMirror;
@@ -149,4 +153,160 @@ pub unsafe extern "C" fn quercus_editor_multicam_source_track(
 	ops::multicam_source_track(&project, multicam, source)
 		.map(|track| track.identity())
 		.unwrap_or(QUERCUS_NODE_ID_INVALID)
+}
+
+/// Reads the multicam node's source track type (`sequence_type_in`, default
+/// video), mirroring `editor_commands::multicam`.
+fn source_track_type(graph: &Graph, multicam: NodeId) -> TrackType {
+	graph
+		.get(multicam)
+		.map(|entry| {
+			let value = entry
+				.core
+				.standard_value(SEQUENCE_TYPE_INPUT, -1)
+				.to_double() as i32;
+			TrackType::from_c(value).unwrap_or(TrackType::Video)
+		})
+		.unwrap_or(TrackType::Video)
+}
+
+/// Number of tracks in the multicam node's connected source track list.
+fn source_count(graph: &Graph, multicam: NodeId) -> i32 {
+	let Some(sequence) = ops::multicam_sequence(graph, multicam) else {
+		return 0;
+	};
+	ops::track_list_of(graph, sequence, source_track_type(graph, multicam))
+		.and_then(|list| ops::track_list_behavior(graph, list))
+		.map(|list| list.tracks.len() as i32)
+		.unwrap_or(0)
+}
+
+/// Reads the multicam node's `current_in` standard value.
+fn current_source(graph: &Graph, multicam: NodeId) -> i32 {
+	graph
+		.get(multicam)
+		.map(|entry| entry.core.standard_value(CURRENT_INPUT, -1).to_double() as i32)
+		.unwrap_or(-1)
+}
+
+/// Number of angles for a multicam node, or -1 when the node is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_multicam_source_count(
+	session: *const EditorSessionHandle,
+	multicam: u64,
+) -> i32 {
+	let (Some(session), Some(multicam)) =
+		(unsafe { session.as_ref() }, NodeId::from_identity(multicam))
+	else {
+		return -1;
+	};
+	let project = session.project();
+	let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+	if guard.graph.get(multicam).is_none() {
+		return -1;
+	}
+	source_count(&guard.graph, multicam)
+}
+
+/// Current angle of a multicam node, or -1 when the node is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_multicam_current_source(
+	session: *const EditorSessionHandle,
+	multicam: u64,
+) -> i32 {
+	let (Some(session), Some(multicam)) =
+		(unsafe { session.as_ref() }, NodeId::from_identity(multicam))
+	else {
+		return -1;
+	};
+	let project = session.project();
+	let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+	if guard.graph.get(multicam).is_none() {
+		return -1;
+	}
+	current_source(&guard.graph, multicam)
+}
+
+/// Copies one angle's display name (`"Video Track N"` by default), or -1 for
+/// an invalid node/source.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_multicam_source_name(
+	session: *const EditorSessionHandle,
+	multicam: u64,
+	source: i32,
+	buf: *mut u8,
+	buf_len: usize,
+) -> i32 {
+	let (Some(session), Some(multicam)) =
+		(unsafe { session.as_ref() }, NodeId::from_identity(multicam))
+	else {
+		return -1;
+	};
+	if source < 0 {
+		return -1;
+	}
+	let project = session.project();
+	let Some(track) = ops::multicam_source_track(&project, multicam, source) else {
+		return -1;
+	};
+	let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+	let Some(track_behavior) = ops::track_behavior(&guard.graph, track) else {
+		return -1;
+	};
+	let index = if track_behavior.index >= 0 {
+		track_behavior.index
+	} else {
+		source
+	};
+	let name = match track_behavior.kind {
+		TrackType::Video => format!("Video Track {index}"),
+		TrackType::Audio => format!("Audio Track {index}"),
+		TrackType::Subtitle => format!("Subtitle Track {index}"),
+	};
+	copy_str_out(&name, buf, buf_len)
+}
+
+/// Computes the square-ish angle grid for `source_count`; false for a
+/// non-positive count or null outputs (nothing is written).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_multicam_grid(
+	source_count: i32,
+	rows: *mut i32,
+	cols: *mut i32,
+) -> bool {
+	let (Some(rows), Some(cols)) = (unsafe { rows.as_mut() }, unsafe { cols.as_mut() }) else {
+		return false;
+	};
+	if source_count <= 0 {
+		return false;
+	}
+	let (row_count, col_count) = MultiCamNode::rows_and_columns(source_count);
+	*rows = row_count;
+	*cols = col_count;
+	true
+}
+
+/// Hit-tests normalized display coordinates against the angle grid (C++
+/// `MulticamDisplay::DisplayClicked`); -1 outside the grid or an empty cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quercus_editor_multicam_source_at(
+	source_count: i32,
+	x: f64,
+	y: f64,
+) -> i32 {
+	if source_count <= 0 || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+		return -1;
+	}
+	let (rows, cols) = MultiCamNode::rows_and_columns(source_count);
+	let multi = rows.max(cols);
+	let col = (x * f64::from(multi)).floor() as i32;
+	let row = (y * f64::from(multi)).floor() as i32;
+	if col >= cols || row >= rows {
+		return -1;
+	}
+	let index = MultiCamNode::rows_cols_to_index(row, col, rows, cols);
+	if index >= source_count {
+		return -1;
+	}
+	index
 }

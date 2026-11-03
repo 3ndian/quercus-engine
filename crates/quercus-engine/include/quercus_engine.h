@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-/* 54 POD structs, 14 enums, 710 functions. */
+/* 54 POD structs, 14 enums, 715 functions. */
 
 /* 3x3 color matrix returned by the colormath helpers. */
 typedef struct QuercusMat3 { float v[3][3]; } QuercusMat3;
@@ -1017,8 +1017,13 @@ int32_t quercus_editor_marker_count(const void* session);
 int32_t quercus_editor_marker_name_at(const void* session, int32_t index, uint8_t* buf, size_t buf_len);
 uint64_t quercus_editor_multicam_clip_at(const void* session, uint64_t sequence, Rational time);
 uint64_t quercus_editor_multicam_connected_sequence(const void* session, uint64_t clip);
+int32_t quercus_editor_multicam_current_source(const void* session, uint64_t multicam);
+bool quercus_editor_multicam_grid(int32_t source_count, int32_t* rows, int32_t* cols);
 bool quercus_editor_multicam_is_clip(const void* session, uint64_t clip);
 uint64_t quercus_editor_multicam_sequence(const void* session, uint64_t multicam);
+int32_t quercus_editor_multicam_source_at(int32_t source_count, double x, double y);
+int32_t quercus_editor_multicam_source_count(const void* session, uint64_t multicam);
+int32_t quercus_editor_multicam_source_name(const void* session, uint64_t multicam, int32_t source, uint8_t* buf, size_t buf_len);
 uint64_t quercus_editor_multicam_source_track(const void* session, uint64_t multicam, int32_t source);
 bool quercus_editor_multicam_state(const void* session, uint64_t clip, RawMulticamState* out);
 void* quercus_editor_new(void);

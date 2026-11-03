@@ -23,6 +23,17 @@ unsafe extern "C" {
 	fn quercus_editor_multicam_clip_at(session: *const c_void, sequence: u64, time: Rational) -> u64;
 	fn quercus_editor_multicam_sequence(session: *const c_void, multicam: u64) -> u64;
 	fn quercus_editor_multicam_source_track(session: *const c_void, multicam: u64, source: i32) -> u64;
+	fn quercus_editor_multicam_source_count(session: *const c_void, multicam: u64) -> i32;
+	fn quercus_editor_multicam_current_source(session: *const c_void, multicam: u64) -> i32;
+	fn quercus_editor_multicam_source_name(
+		session: *const c_void,
+		multicam: u64,
+		source: i32,
+		buf: *mut u8,
+		buf_len: usize,
+	) -> i32;
+	fn quercus_editor_multicam_grid(source_count: i32, rows: *mut i32, cols: *mut i32) -> bool;
+	fn quercus_editor_multicam_source_at(source_count: i32, x: f64, y: f64) -> i32;
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,6 +57,19 @@ pub struct MulticamState {
 	pub source_count: i32,
 	/// The `current_source` field.
 	pub current_source: i32,
+}
+/// One multicam angle: index, source-sequence track, display name and
+/// selection state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MulticamSource {
+	/// Zero-based angle index in the multicam node's source track list.
+	pub index: i32,
+	/// The angle's track inside the multicam node's source sequence.
+	pub track: NodeId,
+	/// Display name (`"Video Track N"`, `"Audio Track N"`, ...).
+	pub name: String,
+	/// Whether this angle is the multicam node's current source.
+	pub current: bool,
 }
 impl EditorSession {
 	/// Resolves a clip's multicam state, or `None` when multicam is not enabled.
@@ -97,12 +121,98 @@ impl EditorSession {
 		});
 		id.is_valid().then_some(id)
 	}
+
+	/// Lists a multicam node's angles, skipping entries that cannot be
+	/// resolved.
+	pub fn multicam_sources(&self, multicam: NodeId) -> Vec<MulticamSource> {
+		let Some(count) = self.multicam_source_count(multicam) else {
+			return Vec::new();
+		};
+		let current = self.multicam_current_source(multicam);
+		let mut sources = Vec::new();
+		for index in 0..count {
+			let Some(track) = self.multicam_source_track(multicam, index) else {
+				continue;
+			};
+			let Some(name) = self.multicam_source_name(multicam, index) else {
+				continue;
+			};
+			sources.push(MulticamSource {
+				index,
+				track,
+				name,
+				current: current == Some(index),
+			});
+		}
+		sources
+	}
+
+	/// Returns a multicam node's angle count, or `None` when it is invalid.
+	pub fn multicam_source_count(&self, multicam: NodeId) -> Option<i32> {
+		let count = unsafe { quercus_editor_multicam_source_count(self.ptr, multicam.raw()) };
+		(count >= 0).then_some(count)
+	}
+
+	/// Returns a multicam node's current angle, or `None` when it is invalid.
+	pub fn multicam_current_source(&self, multicam: NodeId) -> Option<i32> {
+		let current = unsafe { quercus_editor_multicam_current_source(self.ptr, multicam.raw()) };
+		(current >= 0).then_some(current)
+	}
+
+	/// Angle grid layout `(rows, cols)` for `sources`, or `None` when the
+	/// count is not positive.
+	pub fn multicam_grid(sources: i32) -> Option<(i32, i32)> {
+		let mut rows = 0;
+		let mut cols = 0;
+		unsafe { quercus_editor_multicam_grid(sources, &mut rows, &mut cols) }
+			.then_some((rows, cols))
+	}
+
+	/// Hit-tests normalized display coordinates (`0..=1`) against the angle
+	/// grid, returning the source index or `None` outside it / on an empty
+	/// cell.
+	pub fn multicam_source_at(sources: i32, x: f64, y: f64) -> Option<i32> {
+		let index = unsafe { quercus_editor_multicam_source_at(sources, x, y) };
+		(index >= 0).then_some(index)
+	}
+
+	/// Queries an angle's display name through the C ABI.
+	fn multicam_source_name(&self, multicam: NodeId, source: i32) -> Option<String> {
+		let len = unsafe {
+			quercus_editor_multicam_source_name(
+				self.ptr,
+				multicam.raw(),
+				source,
+				std::ptr::null_mut(),
+				0,
+			)
+		};
+		if len < 0 {
+			return None;
+		}
+		let mut buf = vec![0u8; len as usize + 1];
+		let written = unsafe {
+			quercus_editor_multicam_source_name(
+				self.ptr,
+				multicam.raw(),
+				source,
+				buf.as_mut_ptr(),
+				buf.len(),
+			)
+		};
+		if written < 0 {
+			return None;
+		}
+		buf.truncate(written as usize);
+		String::from_utf8(buf).ok()
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use crate::edit::EditCommand;
 	use crate::editor::{EditorSession, TrackKind};
+	use crate::node::NodeId;
 	use crate::types::Rational;
 
 	#[test]
@@ -292,20 +402,21 @@ mod tests {
 				})
 				.is_err()
 		);
-		let source = session
+		let created = session
 			.execute(EditCommand::CreateMulticamSequence {
 				host_sequence: host,
 				angles: vec![angle_a, angle_b],
 				offsets: vec![0.0, 0.5],
 				name: "Wizard".into(),
 			})
-			.expect("create wizard")
-			.primary
-			.expect("source sequence");
+			.expect("create wizard");
+		let source = created.primary.expect("source sequence");
+		assert_eq!(created.ids.len(), 1, "host clip is returned in ids");
 		assert_eq!(session.current_sequence(), Some(host));
 		let host_clip = session
 			.multicam_clip_at(host, Rational::new(0, 1))
 			.expect("host multicam clip");
+		assert_eq!(created.ids[0], host_clip);
 		let state = session.multicam_state(host_clip).expect("wizard state");
 		assert_eq!(state.sequence, source);
 		assert_eq!(state.source_count, 2);
@@ -320,9 +431,9 @@ mod tests {
 			.iter()
 			.filter(|track| track.kind == Some(TrackKind::Video))
 			.flat_map(|track| track.clips.iter())
-			.find(|clip| clip.in_time == Rational::new(13, 25))
+			.find(|clip| clip.in_time == Rational::new(1001, 2000))
 			.expect("angle B offset");
-		assert_eq!(offset_clip.out_time, Rational::new(38, 25));
+		assert_eq!(offset_clip.out_time, Rational::new(3003, 2000));
 		let host_audio = snapshot
 			.sequences
 			.iter()
@@ -359,6 +470,106 @@ mod tests {
 		);
 
 		let _ = std::fs::remove_file(path);
+		let _ = std::fs::remove_file(media_a);
+		let _ = std::fs::remove_file(media_b);
+	}
+
+	#[test]
+	fn multicam_grid_matches_square_growth() {
+		let expected = [
+			(1, 1),
+			(1, 2),
+			(2, 2),
+			(2, 2),
+			(2, 3),
+			(2, 3),
+			(3, 3),
+			(3, 3),
+			(3, 3),
+		];
+		for (index, (rows, cols)) in expected.into_iter().enumerate() {
+			let sources = index as i32 + 1;
+			assert_eq!(EditorSession::multicam_grid(sources), Some((rows, cols)));
+			assert_eq!(super::rows_and_columns(sources), (rows, cols));
+		}
+		assert_eq!(EditorSession::multicam_grid(0), None);
+		assert_eq!(EditorSession::multicam_grid(-3), None);
+	}
+
+	#[test]
+	fn multicam_source_at_hit_tests_grid() {
+		assert_eq!(EditorSession::multicam_source_at(1, 0.0, 0.0), Some(0));
+		assert_eq!(EditorSession::multicam_source_at(1, 0.999, 0.999), Some(0));
+		// 3 sources -> 2x2; index 2 is the bottom-left cell.
+		assert_eq!(EditorSession::multicam_source_at(3, 0.25, 0.75), Some(2));
+		// 5 sources -> 2 rows x 3 cols; index 4 is the last filled cell.
+		assert_eq!(EditorSession::multicam_source_at(5, 0.5, 0.6), Some(4));
+		// The trailing cell of that non-square grid is empty.
+		assert_eq!(EditorSession::multicam_source_at(5, 0.9, 0.6), None);
+		// Outside the normalized range (1.0 maps past the last row/column).
+		assert_eq!(EditorSession::multicam_source_at(2, 1.0, 0.0), None);
+		assert_eq!(EditorSession::multicam_source_at(2, 2.0, 0.0), None);
+		assert_eq!(EditorSession::multicam_source_at(2, 0.0, 1.0), None);
+		assert_eq!(EditorSession::multicam_source_at(2, -0.1, 0.0), None);
+		// Invalid counts.
+		assert_eq!(EditorSession::multicam_source_at(0, 0.5, 0.5), None);
+		assert_eq!(EditorSession::multicam_source_at(-1, 0.5, 0.5), None);
+	}
+
+	#[test]
+	fn multicam_sources_expose_track_names_and_current() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let media_a = crate::test_support::make_test_clip_with_audio("sources_a");
+		let media_b = crate::test_support::make_test_clip_with_audio("sources_b");
+		let angle_a = session.project().import_footage(&media_a).expect("angle A");
+		let angle_b = session.project().import_footage(&media_b).expect("angle B");
+		let host = session.create_sequence("Host").expect("host");
+		let source = session
+			.execute(EditCommand::CreateMulticamSequence {
+				host_sequence: host,
+				angles: vec![angle_a, angle_b],
+				offsets: vec![0.0, 0.5],
+				name: "Sources".into(),
+			})
+			.expect("create multicam")
+			.primary
+			.expect("source sequence");
+		let host_clip = session
+			.multicam_clip_at(host, Rational::new(0, 1))
+			.expect("host multicam clip");
+		let state = session.multicam_state(host_clip).expect("multicam state");
+		assert_eq!(state.sequence, source);
+		assert_eq!(
+			session.multicam_source_count(state.multicam),
+			Some(state.source_count)
+		);
+		assert_eq!(
+			session.multicam_current_source(state.multicam),
+			Some(state.current_source)
+		);
+
+		let sources = session.multicam_sources(state.multicam);
+		assert_eq!(sources.len() as i32, state.source_count);
+		assert!(sources.len() >= 2);
+		assert!(sources.iter().all(|source| !source.name.is_empty()));
+		assert_eq!(sources[0].name, "Video Track 0");
+		assert_eq!(sources[1].name, "Video Track 1");
+		assert_eq!(sources.iter().filter(|source| source.current).count(), 1);
+		for (position, source) in sources.iter().enumerate() {
+			assert_eq!(source.index, position as i32);
+			assert_eq!(source.current, source.index == state.current_source);
+			assert_eq!(
+				session.multicam_source_track(state.multicam, source.index),
+				Some(source.track)
+			);
+		}
+
+		assert!(session.multicam_sources(NodeId::INVALID).is_empty());
+		assert_eq!(session.multicam_source_count(NodeId::INVALID), None);
+
 		let _ = std::fs::remove_file(media_a);
 		let _ = std::fs::remove_file(media_b);
 	}

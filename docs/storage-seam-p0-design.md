@@ -587,7 +587,7 @@ uint32_t write_policy;
 | P0-C 引擎库层 | 15 个 `library_*` 全部走 trait；create/duplicate/import/export 改为通用组合；统计优先 `library_stats`，`Unsupported` 回退 load+图推导；新增 `quercus_storage_library_supported`、`quercus_editor_open_project_from_library_uri` |
 | P0-C SDK | `ProjectLibrary::new` 不再按 `"quercusdb"` 名字拒绝；`library_supported`；显式库打开；`TransportBackend` 可选库能力（POD 镜像 + 4 个 trampoline） |
 | 深拷贝修复 | `clone_entry` 对拒绝 `duplicate` 的节点（图端点等）按 `type_id` 从 factory 重建，不再落成空 `EmptyBehavior`；`SequenceBehavior::duplicate` 保留 track_lists/参数/播放头（否则副本丢轨道） |
-| 头文件 | `gen_c_header.py` 修复函数指针返回类型、`->` 的 `>` 破坏字段切分、跨行空白；header 重新生成（当前 54 structs / 14 enums / 710 functions，含 P1 扩展点） |
+| 头文件 | `gen_c_header.py` 修复函数指针返回类型、`->` 的 `>` 破坏字段切分、跨行空白；header 重新生成（当前 54 structs / 14 enums / 715 functions，含 P1 扩展点） |
 
 ### 8.2 与草案的偏差
 
@@ -605,7 +605,7 @@ uint32_t write_policy;
 |---|---|
 | `cargo test -p quercus-node --lib` | 684 passed |
 | `cargo test -p quercus-storage` | 全绿（22 lib + 13 pg + 18 database + 6 otio + 11 storage + 10 writethrough；transport 测试随适配器迁入 `engine::ext`） |
-| `cargo test -p quercus-engine --lib -- --test-threads=1` | 310 passed（P1 后） |
+| `cargo test -p quercus-engine --lib -- --test-threads=1` | 312 passed（P1 + multicam 后） |
 | `cargo test -p quercus-engine-rs --lib`（`OCIO_SOURCE_DIR`=可写 0.3 源码副本） | 121 passed；0 failed（含 color 与新增跨 ABI transport-library 测试） |
 | `cargo check -p quercus-engine --tests` | 通过（仅既有 warning） |
 | `python3 tooling/gen_c_header.py --check` | 通过 |

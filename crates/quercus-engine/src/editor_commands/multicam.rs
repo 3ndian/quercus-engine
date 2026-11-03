@@ -172,6 +172,12 @@ pub fn set_multicam_enabled(
 		}
 	}
 	if enabled {
+		// A clip that already has a multicam keeps its existing node; wrapping
+		// it again would nest multicams and duplicate the undo entry. Drop
+		// those clips up front (the timeline command guards this too).
+		eligible.retain(|(clip, _)| {
+			quercus_timeline::multicam::clip_find_multicam(&node_ref(project, *clip)).is_none()
+		});
 		if eligible.is_empty() {
 			return Ok(());
 		}
