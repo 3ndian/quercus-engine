@@ -4360,7 +4360,14 @@ mod tests {
 				effects: Vec::new(),
 				audio_effects: Vec::new(),
 			}],
-			bus_effects: Vec::new(),
+			bus_effects: vec![crate::ticket::MontageAudioEffect {
+				type_id: "org.olivevideoeditor.Olive.limiter".into(),
+				enabled: true,
+				params: vec![(
+					"ceiling_db".into(),
+					quercus_node::value::NodeValue::Float(-1.0),
+				)],
+			}],
 		};
 		let spec = build_audio_ticket_spec(5, 2, &params);
 		assert_eq!(spec.ticket, 5);
@@ -4378,6 +4385,12 @@ mod tests {
 		assert_eq!(spec.montage[0].out_den, 4);
 		assert_eq!(spec.montage[0].media_in_num, 0);
 		assert_eq!(spec.montage[0].gain, 0.5);
+		assert_eq!(spec.bus_effects.len(), 1);
+		assert_eq!(
+			spec.bus_effects[0].type_id,
+			"org.olivevideoeditor.Olive.limiter"
+		);
+		assert_eq!(spec.bus_effects[0].params[0].input, "ceiling_db");
 	}
 
 	#[test]
