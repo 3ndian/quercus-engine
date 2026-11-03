@@ -2626,8 +2626,16 @@ fn process_clip_audio(
 ) {
     let channels = channels.max(1);
     let rate = rate.max(1) as f64;
-    let gain = clip.gain as f64;
-    let pan = clip.pan.clamp(-1.0, 1.0) as f64;
+    let gain = if clip.gain.is_finite() {
+        clip.gain as f64
+    } else {
+        1.0
+    };
+    let pan = if clip.pan.is_finite() {
+        clip.pan.clamp(-1.0, 1.0) as f64
+    } else {
+        0.0
+    };
     // Constant-power pan law: centre (0) is -3 dB on both channels,
     // hard left/right isolate one channel.
     let theta = (pan + 1.0) * std::f64::consts::FRAC_PI_4;
@@ -2712,6 +2720,7 @@ fn apply_audio_effect(
     let value = effect
         .param(param_input)
         .map(|value| value.to_double())
+        .filter(|value| value.is_finite())
         .unwrap_or(default);
 
     // Interleaved f32 -> planar F32 SampleBuffer for the node kernel.

@@ -128,8 +128,16 @@ impl MontageAudio {
 	/// [`BlockCore`]: quercus_node::block::BlockCore
 	pub fn from_block_core(core: &quercus_node::block::BlockCore) -> Self {
 		MontageAudio {
-			gain: core.audio_gain.clamp(0.0, 4.0) as f32,
-			pan: core.audio_pan.clamp(-1.0, 1.0) as f32,
+			gain: if core.audio_gain.is_finite() {
+				core.audio_gain.clamp(0.0, 4.0) as f32
+			} else {
+				1.0
+			},
+			pan: if core.audio_pan.is_finite() {
+				core.audio_pan.clamp(-1.0, 1.0) as f32
+			} else {
+				0.0
+			},
 			fade_in: normalize_duration(core.audio_fade_in),
 			fade_out: normalize_duration(core.audio_fade_out),
 			effects: core
@@ -1122,5 +1130,13 @@ mod tests {
 			audio.effects[1].type_id,
 			quercus_node::block::AUDIO_EFFECT_PAN_TYPE_ID
 		);
+
+		// Hand-edited NaN values fall back to unity/centre instead of
+		// poisoning the whole mix.
+		core.audio_gain = f64::NAN;
+		core.audio_pan = f64::NAN;
+		let audio = MontageAudio::from_block_core(&core);
+		assert_eq!(audio.gain, 1.0);
+		assert_eq!(audio.pan, 0.0);
 	}
 }
