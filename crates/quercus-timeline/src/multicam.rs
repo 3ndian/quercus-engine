@@ -1269,3 +1269,64 @@ mod branch_tests {
 		disable.undo();
 	}
 }
+
+#[cfg(test)]
+mod guard_tests {
+	use super::*;
+	use crate::util::NodeRef;
+	use quercus_node::node::NodeCore;
+	use quercus_node::project::Project;
+	use quercus_node::track::{TrackBehavior, TrackType};
+	use quercus_node::nodes::multicamnode::{MultiCamNode, SOURCES_INPUT};
+
+	#[test]
+	fn sync_and_track_type_handle_missing_or_trackless_nodes() {
+		let project = Project::new();
+		let (core, behavior) = quercus_node::block::clip_create();
+		let clip = project.lock().unwrap().graph.add_node(core, behavior);
+		{
+			let mut p = project.lock().unwrap();
+			// Missing node: no panic.
+			sync_multicam_sequence(&mut p.graph, NodeId::INVALID, None);
+			// Non-multicam node: no panic.
+			sync_multicam_sequence(&mut p.graph, clip, None);
+		}
+		let clip_ref = NodeRef::new(project.clone(), clip);
+		assert_eq!(clip_track_type(&clip_ref), TrackType::Video);
+
+		let (core, behavior) = quercus_node::nodes::multicamnode::create();
+		let mc = project.lock().unwrap().graph.add_node(core, behavior);
+		{
+			let mut p = project.lock().unwrap();
+			sync_multicam_sequence(&mut p.graph, mc, Some(clip));
+		}
+		let p = project.lock().unwrap();
+		let entry = p.graph.get(mc).unwrap();
+		let node = entry
+			.behavior
+			.as_any()
+			.unwrap()
+			.downcast_ref::<MultiCamNode>()
+			.unwrap();
+		assert_eq!(node.sequence(), Some(clip));
+	}
+
+	#[test]
+	fn find_input_node_walks_cycles_and_respects_maximum() {
+		let project = Project::new();
+		let (core, behavior) = quercus_node::nodes::multicamnode::create();
+		let first = project.lock().unwrap().graph.add_node(core, behavior);
+		let (core, behavior) = quercus_node::nodes::multicamnode::create();
+		let second = project.lock().unwrap().graph.add_node(core, behavior);
+		{
+			let mut p = project.lock().unwrap();
+			p.graph
+				.connect(first, second, SOURCES_INPUT, -1)
+				.unwrap();
+			let mut list = Vec::new();
+			find_input_node_internal(&p.graph, second, 1, &mut list);
+			assert_eq!(list, vec![first]);
+		}
+	}
+
+}

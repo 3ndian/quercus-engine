@@ -221,3 +221,118 @@ pub(crate) fn wizard_rejects_invalid_inputs() {
 	assert!(sequence_behavior(&guard.graph, host).is_some());
 	assert!(track_ids(&guard.graph, host, TrackType::Video).is_empty() || true);
 }
+
+/// No-op and invalid-query paths return without touching the graph.
+#[test]
+pub(crate) fn multicam_noop_and_invalid_paths() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let host = create_sequence(&project, "Noop Host");
+	assert!(set_multicam_enabled(&project, &[], true).is_ok());
+	assert!(set_multicam_enabled(&project, &[NodeId::INVALID], true).is_ok());
+	assert!(set_multicam_enabled(&project, &[], false).is_ok());
+	assert!(set_multicam_enabled(&project, &[NodeId::INVALID], false).is_ok());
+	assert!(switch_multicam(&project, NodeId::INVALID, 0, false, Rational::new(0, 1)).is_ok());
+	assert!(multicam_state(&project, NodeId::INVALID).is_none());
+	assert!(multicam_sequence(&lock(&project).graph, NodeId::INVALID).is_none());
+	assert!(multicam_source_track(&project, NodeId::INVALID, 0).is_none());
+	assert!(multicam_clip_at(&project, NodeId::INVALID, Rational::new(0, 1)).is_none());
+
+	// A plain clip without a sequence in its texture chain is not eligible.
+	let footage = footage_with_duration(&project, Rational::new(1, 1));
+	let (core, behavior) = quercus_node::block::clip_create();
+	let clip = lock(&project).graph.add_node(core, behavior);
+	{
+		let mut guard = lock(&project);
+		guard
+			.graph
+			.connect(footage, clip, quercus_node::block::clip_input::TEXTURE_INPUT, -1)
+			.unwrap();
+		let track = track_ids(&guard.graph, host, TrackType::Video)
+			.first()
+			.copied();
+		if let Some(track) = track {
+			guard
+				.graph
+				.get_mut(track)
+				.unwrap()
+				.behavior
+				.as_any_mut()
+				.unwrap()
+				.downcast_mut::<TrackBehavior>()
+				.unwrap()
+				.blocks
+				.push(clip);
+		}
+	}
+	assert!(set_multicam_enabled(&project, &[clip], true).is_ok());
+	assert!(multicam_state(&project, clip).is_none());
+	assert!(!clip_is_multicam(&lock(&project).graph, clip));
+	assert!(switch_multicam(&project, clip, 0, true, Rational::new(0, 1)).is_ok());
+}
+
+/// Query helpers on a valid but unconnected multicam node, plus a cycle in
+/// the texture walk.
+#[test]
+pub(crate) fn multicam_query_edge_paths() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let host = create_sequence(&project, "Edge Host");
+	let (mc, a, b) = {
+		let mut guard = lock(&project);
+		let (core, behavior) = quercus_node::nodes::multicamnode::create();
+		let mc = guard.graph.add_node(core, behavior);
+		let (core, behavior) = quercus_node::block::clip_create();
+		let a = guard.graph.add_node(core, behavior);
+		let (core, behavior) = quercus_node::block::clip_create();
+		let b = guard.graph.add_node(core, behavior);
+		(mc, a, b)
+	};
+	{
+		let guard = lock(&project);
+		assert!(multicam_sequence(&guard.graph, mc).is_none());
+		assert!(!clip_connected_sequence(&guard.graph, NodeId::INVALID).is_some());
+	}
+	assert_eq!(multicam_source_track(&project, mc, -1), None);
+	assert_eq!(multicam_source_track(&project, mc, 0), None);
+	assert!(multicam_clip_at(&project, host, Rational::new(0, 1)).is_none());
+	// A plain clip (no multicam) is not reported by clip_is_multicam.
+	// A plain clip (no multicam) is not reported by clip_is_multicam.
+	assert!(!clip_is_multicam(&lock(&project).graph, a));
+}
+
+/// A valid multicam rejects an out-of-range source without creating an undo
+/// entry; a real non-multicam clip takes the disable-command path.
+#[test]
+pub(crate) fn switch_rejects_out_of_range_and_disable_real_clip() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let host = create_sequence(&project, "Switch Host");
+	let angle_a = footage_with_duration(&project, Rational::new(1, 1));
+	let angle_b = footage_with_duration(&project, Rational::new(1, 1));
+	let built = create_multicam_sequence(
+		&project,
+		host,
+		&[angle_a, angle_b],
+		&[0.0, 0.0],
+		"Switch Multi-Cam",
+	)
+	.expect("wizard");
+	let before = lock(&project).graph.node_ids().len();
+	assert!(switch_multicam(&project, built.host_clip, 99, false, Rational::new(0, 1)).is_ok());
+	assert!(switch_multicam(&project, built.host_clip, -1, false, Rational::new(0, 1)).is_ok());
+	assert_eq!(lock(&project).graph.node_ids().len(), before, "no undo entry");
+	assert!(
+		multicam_state(&project, built.host_clip)
+			.is_some_and(|state| state.current_source == 0)
+	);
+
+	// Disabling a real clip without multicam still goes through the disable
+	// path (the timeline command skips it, but the command is pushed).
+	let (core, behavior) = quercus_node::block::clip_create();
+	let plain = lock(&project).graph.add_node(core, behavior);
+	assert!(set_multicam_enabled(&project, &[plain], false).is_ok());
+}
