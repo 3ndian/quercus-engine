@@ -582,7 +582,7 @@ impl RenderTask {
 						in_time: core.in_(),
 						out_time: core.out(),
 						media_in: core.media_in,
-						gain: 1.0,
+						gain: core.audio_gain.clamp(0.0, 4.0) as f32,
 						// Audio clips carry no effect stack (video-side
 						// concept; the mixer never consults it).
 						effects: Vec::new(),
@@ -1787,9 +1787,23 @@ mod tests {
 			}
 		}
 
+		// Per-clip gain flows into the montage.
+		{
+			let mut guard = project.lock().unwrap();
+			if let Some(entry) = guard.graph.get_mut(ok) {
+				if let Some(clip) = entry
+					.behavior
+					.as_any_mut()
+					.and_then(|a| a.downcast_mut::<quercus_node::block::ClipBlockBehavior>())
+				{
+					clip.core.audio_gain = 0.5;
+				}
+			}
+		}
 		let montage = RenderTask::audio_montage(&project, sequence, Rational::new(1, 1));
 		assert_eq!(montage.len(), 1);
 		assert_eq!(montage[0].filename, "audio.mp4");
+		assert!((montage[0].gain - 0.5).abs() < 1e-6);
 		assert!(montage[0].effects.is_empty(), "audio carries no effects");
 
 		assert!(RenderTask::audio_montage(&project, sequence, Rational::new(5, 1)).is_empty());

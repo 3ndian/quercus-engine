@@ -66,6 +66,18 @@ unsafe extern "C" {
 		buf_len: usize,
 	) -> i32;
 	fn quercus_editor_workarea(session: *const c_void, out: *mut TimeRange) -> bool;
+	fn quercus_editor_import_subtitles(
+		session: *const c_void,
+		path: *const u8,
+		path_len: usize,
+		track_index: i32,
+	) -> i32;
+	fn quercus_editor_export_subtitles(
+		session: *const c_void,
+		path: *const u8,
+		path_len: usize,
+	) -> i32;
+	fn quercus_editor_set_clip_gain(session: *const c_void, clip: u64, gain: f64) -> bool;
 }
 
 #[repr(C)]
@@ -314,6 +326,39 @@ impl EditorSession {
 		let mut range = TimeRange::default();
 		let enabled = unsafe { quercus_editor_workarea(self.ptr, &mut range) };
 		(enabled, range)
+	}
+
+	/// Imports an SRT file as Text clips on the current sequence and track.
+	/// Returns the cue count.
+	pub fn import_subtitles(
+		&self,
+		path: &std::path::Path,
+		track_index: usize,
+	) -> Result<usize, i32> {
+		let path = path.to_str().ok_or(-1)?;
+		let count = unsafe {
+			quercus_editor_import_subtitles(
+				self.ptr,
+				path.as_ptr(),
+				path.len(),
+				track_index as i32,
+			)
+		};
+		(count >= 0).then_some(count as usize).ok_or(count)
+	}
+
+	/// Sets a clip's audio gain (0..=4, 1 = unity) as one undo entry.
+	pub fn set_clip_gain(&self, clip: NodeId, gain: f64) -> bool {
+		unsafe { quercus_editor_set_clip_gain(self.ptr, clip.raw(), gain) }
+	}
+
+	/// Exports the current sequence's Text clips as an SRT file.
+	pub fn export_subtitles(&self, path: &std::path::Path) -> Result<usize, i32> {
+		let path = path.to_str().ok_or(-1)?;
+		let count = unsafe {
+			quercus_editor_export_subtitles(self.ptr, path.as_ptr(), path.len())
+		};
+		(count >= 0).then_some(count as usize).ok_or(count)
 	}
 }
 
@@ -626,5 +671,41 @@ mod edit_result_primary_tests {
 			.collect::<Vec<_>>();
 		assert!(clips.iter().any(|c| c.id == rear), "rear half must exist");
 		let _ = std::fs::remove_file(media);
+	}
+}
+
+#[cfg(test)]
+mod subtitle_roundtrip_tests {
+	use super::*;
+
+	#[test]
+	fn srt_import_export_through_sdk() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let _sequence = session.create_sequence("Subtitle SDK").expect("sequence");
+		let input = std::env::temp_dir().join(format!(
+			"quercus_sdk_subtitle_{}.srt",
+			std::process::id()
+		));
+		std::fs::write(
+			&input,
+			"1\n00:00:00,500 --> 00:00:01,500\nFirst\n\n2\n00:00:02,000 --> 00:00:03,000\nSecond\n",
+		)
+		.unwrap();
+		let count = session.import_subtitles(&input, 0).expect("import");
+		assert_eq!(count, 2);
+		let output = std::env::temp_dir().join(format!(
+			"quercus_sdk_subtitle_out_{}.srt",
+			std::process::id()
+		));
+		let exported = session.export_subtitles(&output).expect("export");
+		assert_eq!(exported, 2);
+		let text = std::fs::read_to_string(&output).unwrap();
+		assert!(text.contains("First"));
+		assert!(text.contains("Second"));
+		let _ = std::fs::remove_file(input);
+		let _ = std::fs::remove_file(output);
 	}
 }

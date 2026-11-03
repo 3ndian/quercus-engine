@@ -322,3 +322,50 @@ pub fn switch_multicam(
 	}
 	push_multi_command(commands, quercus_timeline::multicam::SWITCH_LABEL)
 }
+
+/// Set a clip's audio gain (1.0 = unity) as one undoable command.
+pub fn set_clip_gain(project: &ProjectRef, clip: NodeId, gain: f64) -> Result<(), String> {
+	if !gain.is_finite() || !(0.0..=4.0).contains(&gain) {
+		return Err("audio gain must be finite and within 0..=4".into());
+	}
+	let old = {
+		let guard = lock(project);
+		guard
+			.graph
+			.get(clip)
+			.and_then(|entry| entry.behavior.as_any())
+			.and_then(|behavior| behavior.downcast_ref::<quercus_node::block::ClipBlockBehavior>())
+			.map(|clip| clip.core.audio_gain)
+			.ok_or_else(|| "the node is not a clip".to_string())?
+	};
+	if (old - gain).abs() < f64::EPSILON {
+		return Ok(());
+	}
+	let redo_project = project.clone();
+	let undo_project = project.clone();
+	super::media::push_command(
+		quercus_undo::undocommand::UndoCommand::from_closures(
+			move || {
+				if let Some(clip) = lock(&redo_project)
+					.graph
+					.get_mut(clip)
+					.and_then(|entry| entry.behavior.as_any_mut())
+					.and_then(|behavior| behavior.downcast_mut::<quercus_node::block::ClipBlockBehavior>())
+				{
+					clip.core.audio_gain = gain;
+				}
+			},
+			move || {
+				if let Some(clip) = lock(&undo_project)
+					.graph
+					.get_mut(clip)
+					.and_then(|entry| entry.behavior.as_any_mut())
+					.and_then(|behavior| behavior.downcast_mut::<quercus_node::block::ClipBlockBehavior>())
+				{
+					clip.core.audio_gain = old;
+				}
+			},
+		),
+		"Set Clip Gain",
+	)
+}

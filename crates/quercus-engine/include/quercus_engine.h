@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-/* 54 POD structs, 14 enums, 715 functions. */
+/* 54 POD structs, 14 enums, 718 functions. */
 
 /* 3x3 color matrix returned by the colormath helpers. */
 typedef struct QuercusMat3 { float v[3][3]; } QuercusMat3;
@@ -997,6 +997,7 @@ uint64_t quercus_editor_current_sequence(const void* session);
 int32_t quercus_editor_edit(void* session, uint32_t op, const QuercusEditParams* params, QuercusEditResult* result, uint8_t* error, size_t error_len);
 uint64_t quercus_editor_edit_subscribe(void* session, void (* callback)(void*, uint32_t, int64_t), void* user_data, void (* drop_callback)(void*));
 bool quercus_editor_edit_unsubscribe(void* session, uint64_t id);
+int32_t quercus_editor_export_subtitles(const void* session, const uint8_t* path, size_t path_len);
 void* quercus_editor_from_project_handle(void* project);
 bool quercus_editor_graph_can_connect(void* session, uint64_t from, uint64_t to, const uint8_t* input_id, size_t input_id_len, int32_t element);
 bool quercus_editor_graph_edge_at(const void* graph, int32_t index, GraphEdgeRaw* out);
@@ -1012,6 +1013,7 @@ int32_t quercus_editor_graph_port_label_at(const void* graph, int32_t node, int3
 void quercus_editor_graph_release(const void* graph);
 int64_t quercus_editor_graph_revision(const void* graph);
 void* quercus_editor_graph_snapshot(void* session, uint64_t sequence, uint64_t clip);
+int32_t quercus_editor_import_subtitles(const void* session, const uint8_t* path, size_t path_len, int32_t track_index);
 bool quercus_editor_marker_at(const void* session, int32_t index, EditorMarkerRaw* out);
 int32_t quercus_editor_marker_count(const void* session);
 int32_t quercus_editor_marker_name_at(const void* session, int32_t index, uint8_t* buf, size_t buf_len);
@@ -1054,6 +1056,7 @@ int32_t quercus_editor_proxy_path(const void* session, uint64_t footage, uint8_t
 bool quercus_editor_proxy_status(const void* session, uint64_t footage, RawProxyStatus* out);
 void quercus_editor_release(const void* session);
 int32_t quercus_editor_save(const void* session, const uint8_t* path, size_t path_len, uint32_t options);
+bool quercus_editor_set_clip_gain(const void* session, uint64_t clip, double gain);
 bool quercus_editor_set_current_sequence(void* session, uint64_t id);
 bool quercus_editor_storage_bound(const void* session);
 int32_t quercus_editor_storage_last_error(const void* session, uint8_t* buf, size_t buf_len);

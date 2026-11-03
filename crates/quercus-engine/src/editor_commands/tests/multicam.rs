@@ -336,3 +336,67 @@ pub(crate) fn switch_rejects_out_of_range_and_disable_real_clip() {
 	let plain = lock(&project).graph.add_node(core, behavior);
 	assert!(set_multicam_enabled(&project, &[plain], false).is_ok());
 }
+
+#[test]
+pub(crate) fn clip_gain_is_undoable_and_bounded() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let sequence = create_sequence(&project, "Gain");
+	let footage = footage_with_duration(&project, Rational::new(1, 1));
+	let (core, behavior) = quercus_node::block::clip_create();
+	let clip = lock(&project).graph.add_node(core, behavior);
+	{
+		let mut guard = lock(&project);
+		let track = track_ids(&guard.graph, sequence, TrackType::Video)
+			.first()
+			.copied()
+			.unwrap();
+		guard
+			.graph
+			.get_mut(track)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<TrackBehavior>()
+			.unwrap()
+			.blocks
+			.push(clip);
+		guard
+			.graph
+			.connect(footage, clip, quercus_node::block::clip_input::TEXTURE_INPUT, -1)
+			.unwrap();
+	}
+	assert!(set_clip_gain(&project, clip, 0.5).is_ok());
+	assert_eq!(
+		lock(&project)
+			.graph
+			.get(clip)
+			.unwrap()
+			.behavior
+			.as_any()
+			.unwrap()
+			.downcast_ref::<quercus_node::block::ClipBlockBehavior>()
+			.unwrap()
+			.core
+			.audio_gain,
+		0.5
+	);
+	assert!(set_clip_gain(&project, clip, 9.0).is_err());
+	quercus_undo::global::undo().unwrap();
+	assert_eq!(
+		lock(&project)
+			.graph
+			.get(clip)
+			.unwrap()
+			.behavior
+			.as_any()
+			.unwrap()
+			.downcast_ref::<quercus_node::block::ClipBlockBehavior>()
+			.unwrap()
+			.core
+			.audio_gain,
+		1.0
+	);
+}

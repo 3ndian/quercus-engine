@@ -59,6 +59,7 @@ pub mod oiio;
 pub mod oiioframebridge;
 pub mod planarfiledevice;
 pub mod proxymanager;
+pub mod subtitles;
 pub mod task;
 pub mod testmedia;
 pub mod timecodemetadata;

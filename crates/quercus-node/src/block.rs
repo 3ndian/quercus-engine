@@ -45,6 +45,8 @@ pub struct BlockCore {
 	pub loop_mode: i32,
 	/// Owning track id (None when trackless).
 	pub track: Option<NodeId>,
+	/// Per-clip audio gain (1.0 = unity).
+	pub audio_gain: f64,
 }
 
 impl Default for BlockCore {
@@ -59,6 +61,7 @@ impl Default for BlockCore {
 			maintain_audio_pitch: false,
 			loop_mode: 0,
 			track: None,
+			audio_gain: 1.0,
 		}
 	}
 }
@@ -217,6 +220,7 @@ fn save_block_core(writer: &mut dyn crate::serializer::XmlWrite, core: &BlockCor
 		if core.maintain_audio_pitch { "1" } else { "0" },
 	);
 	writer.text_element("loop_mode", &core.loop_mode.to_string());
+	writer.text_element("audio_gain", &core.audio_gain.to_string());
 	if let Some(t) = core.track {
 		writer.text_element("track", &t.identity().to_string());
 	}
@@ -259,6 +263,13 @@ fn load_block_core(
 			}
 			"loop_mode" => {
 				core.loop_mode = reader.read_element_text().trim().parse().unwrap_or(core.loop_mode)
+			}
+			"audio_gain" => {
+				core.audio_gain = reader
+					.read_element_text()
+					.trim()
+					.parse()
+					.unwrap_or(core.audio_gain)
 			}
 			"track" => core.track = crate::serializer::parse_node_ref(&reader.read_element_text()),
 			_ => {

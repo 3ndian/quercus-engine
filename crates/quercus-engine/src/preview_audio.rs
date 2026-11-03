@@ -225,7 +225,7 @@ fn audio_montage(project: &Project, sequence: NodeId, range: TimeRange) -> Vec<M
 					in_time,
 					out_time,
 					media_in: clip.core.media_in,
-					gain: 1.0,
+					gain: clip.core.audio_gain.clamp(0.0, 4.0) as f32,
 					effects: Vec::new(),
 				});
 			}

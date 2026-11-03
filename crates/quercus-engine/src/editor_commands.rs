@@ -31,6 +31,8 @@ pub use multicam::*;
 mod multicam_wizard;
 pub use multicam_wizard::*;
 mod edit_menu;
+mod subtitles;
+pub use subtitles::*;
 pub use edit_menu::*;
 #[cfg(test)]
 mod tests;
