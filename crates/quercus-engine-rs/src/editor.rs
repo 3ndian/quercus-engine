@@ -953,6 +953,7 @@ mod subtitle_roundtrip_tests {
 			font_family: "Serif".to_string(),
 			font_size: 30.0,
 			color: [0.0, 1.0, 0.0, 1.0],
+			outline_enabled: false,
 			outline_width: 0.0,
 			align: 0,
 			..SubtitleStyle::default()

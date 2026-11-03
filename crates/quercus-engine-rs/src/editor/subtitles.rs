@@ -29,9 +29,12 @@ pub struct SubtitleStyle {
 	pub color: [f64; 4],
 	/// RGBA outline color.
 	pub outline_color: [f64; 4],
-	/// Outline width in points; `0` disables the outline.
+	/// Whether the outline pass is enabled.
+	pub outline_enabled: bool,
+	/// Outline width in points; `0` draws nothing even when enabled.
 	pub outline_width: f32,
-	/// Alignment selector (0, 1 or 2).
+	/// Vertical alignment selector (0 = top, 1 = middle, 2 = bottom);
+	/// text3 has no horizontal alignment input.
 	pub align: i32,
 	/// Horizontal margin (ignored by text3).
 	pub margin_h: f32,
@@ -48,6 +51,7 @@ impl Default for SubtitleStyle {
 			font_size: 72.0,
 			color: [1.0, 1.0, 1.0, 1.0],
 			outline_color: [0.0, 0.0, 0.0, 1.0],
+			outline_enabled: true,
 			outline_width: 2.0,
 			align: 1,
 			margin_h: 0.0,
@@ -72,6 +76,7 @@ impl SubtitleStyle {
 			font_size: self.font_size,
 			color: self.color,
 			outline_color: self.outline_color,
+			outline_enabled: self.outline_enabled,
 			outline_width: self.outline_width,
 			align: self.align,
 			margin_h: self.margin_h,
@@ -89,6 +94,7 @@ struct QuercusSubtitleStyle {
 	font_size: f32,
 	color: [f64; 4],
 	outline_color: [f64; 4],
+	outline_enabled: bool,
 	outline_width: f32,
 	align: i32,
 	margin_h: f32,
@@ -131,6 +137,7 @@ impl EditorSession {
 			font_size: raw.font_size,
 			color: raw.color,
 			outline_color: raw.outline_color,
+			outline_enabled: raw.outline_enabled,
 			outline_width: raw.outline_width,
 			align: raw.align,
 			margin_h: raw.margin_h,

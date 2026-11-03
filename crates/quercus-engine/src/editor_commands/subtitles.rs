@@ -44,9 +44,7 @@ const VERTICAL_ALIGNMENT_INPUT: &str = "valign_in";
 ///
 /// Values mirror the C ABI `QuercusSubtitleStyle`. The [`Default`] values
 /// match the text3 node defaults: no font-family override, 72 pt, opaque
-/// white fill, opaque black outline color, and a 2 px outline width. Since
-/// the style has no outline-enable flag, a non-zero width enables the
-/// outline when the style is applied.
+/// white fill, an enabled black 2 px outline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubtitleStyle {
 	/// Font family name; empty selects the backend default font.
@@ -57,7 +55,9 @@ pub struct SubtitleStyle {
 	pub color: [f64; 4],
 	/// RGBA outline color.
 	pub outline_color: [f64; 4],
-	/// Outline width in points. `0` disables the outline.
+	/// Whether the outline pass is enabled. Width `0` still draws nothing.
+	pub outline_enabled: bool,
+	/// Outline width in points.
 	pub outline_width: f32,
 	/// Alignment selector (0, 1, 2). Mapped to text3 vertical alignment
 	/// because the node has no horizontal alignment input.
@@ -77,6 +77,7 @@ impl Default for SubtitleStyle {
 			font_size: 72.0,
 			color: [1.0, 1.0, 1.0, 1.0],
 			outline_color: [0.0, 0.0, 0.0, 1.0],
+			outline_enabled: true,
 			outline_width: 2.0,
 			align: 1,
 			margin_h: 0.0,
@@ -178,10 +179,7 @@ fn push_style_commands(
 			),
 			(FONT_SIZE_INPUT, NodeValue::Float(style.font_size as f64)),
 			(COLOR_INPUT, NodeValue::Color(style.color)),
-			(
-				OUTLINE_ENABLED_INPUT,
-				NodeValue::Boolean(style.outline_width > 0.0),
-			),
+			(OUTLINE_ENABLED_INPUT, NodeValue::Boolean(style.outline_enabled)),
 			(OUTLINE_COLOR_INPUT, NodeValue::Color(style.outline_color)),
 			(
 				OUTLINE_WIDTH_INPUT,

@@ -24,9 +24,12 @@ pub struct QuercusSubtitleStyle {
 	pub color: [f64; 4],
 	/// RGBA outline color.
 	pub outline_color: [f64; 4],
-	/// Outline width in points; `0` disables the outline.
+	/// Whether the outline pass is enabled.
+	pub outline_enabled: bool,
+	/// Outline width in points; `0` draws nothing even when enabled.
 	pub outline_width: f32,
-	/// Alignment selector (0, 1 or 2).
+	/// Vertical alignment selector (0 = top, 1 = middle, 2 = bottom);
+	/// text3 has no horizontal alignment input.
 	pub align: i32,
 	/// Horizontal margin (ignored by the text3 application).
 	pub margin_h: f32,
@@ -51,6 +54,7 @@ impl Default for QuercusSubtitleStyle {
 			font_size: native.font_size,
 			color: native.color,
 			outline_color: native.outline_color,
+			outline_enabled: native.outline_enabled,
 			outline_width: native.outline_width,
 			align: native.align,
 			margin_h: native.margin_h,
@@ -77,6 +81,7 @@ impl QuercusSubtitleStyle {
 			font_size: self.font_size,
 			color: self.color,
 			outline_color: self.outline_color,
+			outline_enabled: self.outline_enabled,
 			outline_width: self.outline_width,
 			align: self.align,
 			margin_h: self.margin_h,

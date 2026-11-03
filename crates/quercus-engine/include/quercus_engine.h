@@ -597,6 +597,7 @@ struct QuercusSubtitleStyle {
     float font_size;
     double color[4];
     double outline_color[4];
+    bool outline_enabled;
     float outline_width;
     int32_t align;
     float margin_h;
