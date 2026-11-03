@@ -473,3 +473,158 @@ mod tests {
 		);
 	}
 }
+
+#[cfg(test)]
+mod auxiliary_roundtrip_tests {
+	use super::*;
+	use crate::edit::EditCommand;
+	use crate::types::{Rational, TimeRange};
+
+	#[test]
+	fn markers_and_workarea_survive_save_open() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let _sequence = session.create_sequence("Markers").expect("sequence");
+		session
+			.execute(EditCommand::MarkerAdd {
+				time: Rational::new(1, 1),
+				name: "Marker One".into(),
+				color: 3,
+			})
+			.expect("marker");
+		session
+			.execute(EditCommand::WorkareaSet {
+				enabled: true,
+				range: TimeRange::new(Rational::new(1, 1), Rational::new(3, 1)),
+			})
+			.expect("workarea");
+
+		let path = std::env::temp_dir()
+			.join(format!("quercus_sdk_marker_roundtrip_{}.ove", std::process::id()))
+			.to_string_lossy()
+			.into_owned();
+		session.save(&path).expect("save");
+		let opened = EditorSession::open(&path).expect("open");
+		let markers = opened.markers();
+		assert_eq!(markers.len(), 1);
+		assert_eq!(markers[0].name, "Marker One");
+		assert_eq!(
+			markers[0].time,
+			TimeRange::new(Rational::new(1, 1), Rational::new(1, 1))
+		);
+		assert_eq!(markers[0].color, 3);
+		let (enabled, range) = opened.workarea_state();
+		assert!(enabled);
+		assert_eq!(range, TimeRange::new(Rational::new(1, 1), Rational::new(3, 1)));
+		let _ = std::fs::remove_file(path);
+	}
+}
+
+#[cfg(test)]
+mod length_snapshot_tests {
+	use super::*;
+	use crate::edit::EditCommand;
+	use crate::types::Rational;
+
+	#[test]
+	fn snapshot_length_is_computed_from_blocks() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let sequence = session.create_sequence("Length").expect("sequence");
+		let media = crate::test_support::make_test_clip("length_snapshot");
+		let footage = session.project().import_footage(&media).expect("footage");
+		session
+			.execute(EditCommand::PlaceFootageClip {
+				footage,
+				kind: crate::editor::TrackKind::Video,
+				track_index: 0,
+				in_ts: 0,
+				out_ts: 25,
+				media_in_ts: 0,
+			})
+			.expect("place clip");
+		let snapshot = session.snapshot();
+		let sequence_snapshot = snapshot
+			.sequences
+			.iter()
+			.find(|s| s.id == sequence)
+			.expect("sequence snapshot");
+		assert_eq!(
+			sequence_snapshot.length,
+			Rational::new(1001, 1200),
+			"length must reflect the placed clip without app-side verify"
+		);
+		let _ = std::fs::remove_file(media);
+	}
+}
+
+#[cfg(test)]
+mod edit_result_primary_tests {
+	use super::*;
+	use crate::edit::EditCommand;
+	use crate::editor::TrackKind;
+
+	#[test]
+	fn add_track_and_split_return_primary_nodes() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let sequence = session.create_sequence("Primary").expect("sequence");
+		let added = session
+			.execute(EditCommand::AddTrack {
+				kind: TrackKind::Video,
+			})
+			.expect("add track");
+		let track = added.primary.expect("add track primary");
+		let snapshot = session.snapshot();
+		let sequence_snapshot = snapshot
+			.sequences
+			.iter()
+			.find(|s| s.id == sequence)
+			.expect("sequence snapshot");
+		assert!(
+			sequence_snapshot.tracks.iter().any(|t| t.id == track),
+			"primary must be the new track"
+		);
+
+		let media = crate::test_support::make_test_clip("primary_split");
+		let footage = session.project().import_footage(&media).expect("footage");
+		let clip = session
+			.execute(EditCommand::PlaceFootageClip {
+				footage,
+				kind: TrackKind::Video,
+				track_index: 0,
+				in_ts: 0,
+				out_ts: 25,
+				media_in_ts: 0,
+			})
+			.expect("place")
+			.primary
+			.expect("clip");
+		let split = session
+			.execute(EditCommand::SplitClip {
+				clip,
+				time_ts: 10,
+			})
+			.expect("split");
+		let rear = split.primary.expect("split primary");
+		assert_ne!(rear, clip);
+		let snapshot = session.snapshot();
+		let clips = snapshot
+			.sequences
+			.iter()
+			.find(|s| s.id == sequence)
+			.expect("sequence")
+			.tracks
+			.iter()
+			.flat_map(|t| t.clips.iter())
+			.collect::<Vec<_>>();
+		assert!(clips.iter().any(|c| c.id == rear), "rear half must exist");
+		let _ = std::fs::remove_file(media);
+	}
+}

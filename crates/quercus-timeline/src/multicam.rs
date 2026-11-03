@@ -1239,3 +1239,33 @@ mod tests {
 		assert!(multicam_of(&fx, &bare).is_none());
 	}
 }
+
+#[cfg(test)]
+mod branch_tests {
+	use super::*;
+
+	#[test]
+	fn empty_enable_and_disable_commands_are_safe() {
+		let project = Project::new();
+		let (seq_id, _) = {
+			let mut p = project.lock().unwrap();
+			let (core, behavior) = quercus_node::sequence::SequenceBehavior::create();
+			(core, behavior)
+		};
+		let _ = (seq_id, ());
+		let fx = {
+			// Build a minimal sequence handle without relying on the test
+			// fixture module (kept private to the other test module).
+			let mut p = project.lock().unwrap();
+			let (core, behavior) = quercus_node::sequence::SequenceBehavior::create();
+			let seq = p.graph.add_node(core, behavior);
+			NodeRef::new(project.clone(), seq)
+		};
+		let mut enable = MultiCamEnableCommand::new(Vec::new(), fx.clone());
+		enable.redo();
+		enable.undo();
+		let mut disable = MultiCamDisableCommand::new(Vec::new());
+		disable.redo();
+		disable.undo();
+	}
+}

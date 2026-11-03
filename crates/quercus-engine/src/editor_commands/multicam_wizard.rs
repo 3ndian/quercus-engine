@@ -354,3 +354,28 @@ pub fn create_multicam_sequence(
 		host_clip,
 	})
 }
+
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The timebase helpers clamp invalid frame durations and negative
+	/// offsets, and always produce a non-empty range.
+	#[test]
+	fn timebase_helpers_are_total() {
+		let tb = (1, 30);
+		assert_eq!(ts_for_seconds(0.5, tb), 15);
+		assert_eq!(ts_for_seconds(-3.0, tb), 0);
+		assert_eq!(ts_for_seconds(f64::NAN, tb), 0);
+		assert_eq!(ts_for_seconds(1.0, (0, 0)), 25);
+		assert_eq!(ts_for_seconds(1.0, (-1, 30)), 25);
+
+		let range = range_for_seconds(0.5, 0.0, tb);
+		assert_eq!(range.in_(), Rational::new(1, 2));
+		assert_eq!(range.out(), Rational::new(8, 15));
+		let fallback = range_for_seconds(0.0, 1.0, (0, 0));
+		assert_eq!(fallback.in_(), Rational::new(0, 1));
+		assert_eq!(fallback.out(), Rational::new(1, 1));
+	}
+}

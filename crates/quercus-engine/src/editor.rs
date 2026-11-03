@@ -84,6 +84,117 @@ impl SessionState {
 	}
 }
 
+/// Project settings keys used to persist sequence-local auxiliary state
+/// through the normal `.ove` serializer (the node crate cannot depend on
+/// quercus-timeline, so the engine serializes these JSON blobs).
+const MARKERS_SETTING: &str = "quercus.markers";
+const WORKAREA_SETTING: &str = "quercus.workarea";
+
+fn rational_json(value: quercus_core::Rational) -> serde_json::Value {
+	serde_json::json!([value.numerator(), value.denominator()])
+}
+
+fn rational_from_json(value: &serde_json::Value) -> Option<quercus_core::Rational> {
+	let array = value.as_array()?;
+	let num = array.first()?.as_i64()?;
+	let den = array.get(1)?.as_i64()?;
+	Some(quercus_core::Rational::new(num, den))
+}
+
+/// Write the session's markers/work area into the project's settings map so
+/// the storage serializer persists them. The `.ove` writer escapes values.
+fn sync_auxiliary_to_settings(session: &EditorSessionHandle) {
+	let (project, markers, workarea) = {
+		let state = session.inner.lock().unwrap_or_else(|e| e.into_inner());
+		(
+			state.project.clone(),
+			state.markers.clone(),
+			state.workarea.clone(),
+		)
+	};
+	let markers = {
+		let list = markers.lock().unwrap_or_else(|e| e.into_inner());
+		let mut out = Vec::with_capacity(list.size());
+		for index in 0..list.size() {
+			if let Some(marker) = list.at(index) {
+				out.push(serde_json::json!({
+					"in": rational_json(marker.time().in_()),
+					"out": rational_json(marker.time().out()),
+					"name": marker.name(),
+					"color": marker.color(),
+				}));
+			}
+		}
+		serde_json::Value::Array(out).to_string()
+	};
+	let workarea = {
+		let area = workarea.lock().unwrap_or_else(|e| e.into_inner());
+		serde_json::json!({
+			"enabled": area.enabled(),
+			"in": rational_json(area.in_()),
+			"out": rational_json(area.out()),
+		})
+		.to_string()
+	};
+	let mut guard = project.lock().unwrap_or_else(|e| e.into_inner());
+	guard.settings.insert(MARKERS_SETTING.to_string(), markers);
+	guard.settings.insert(WORKAREA_SETTING.to_string(), workarea);
+}
+
+/// Restore markers/work area from a project's settings after load.
+fn restore_auxiliary_from_settings(session: &EditorSessionHandle) {
+	let (project, markers, workarea) = {
+		let state = session.inner.lock().unwrap_or_else(|e| e.into_inner());
+		(
+			state.project.clone(),
+			state.markers.clone(),
+			state.workarea.clone(),
+		)
+	};
+	let (marker_json, workarea_json) = {
+		let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+		(
+			guard.settings.get(MARKERS_SETTING).cloned(),
+			guard.settings.get(WORKAREA_SETTING).cloned(),
+		)
+	};
+	if let Some(text) = marker_json {
+		if let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&text) {
+			let mut list = markers.lock().unwrap_or_else(|e| e.into_inner());
+			*list = TimelineMarkerList::new();
+			for item in items {
+				let (Some(in_), Some(out)) = (
+					item.get("in").and_then(rational_from_json),
+					item.get("out").and_then(rational_from_json),
+				) else {
+					continue;
+				};
+				let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+				let color = item.get("color").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+				list.add_marker(quercus_timeline::marker::TimelineMarker::with_time(
+					color,
+					quercus_core::TimeRange::new(in_, out),
+					name,
+				));
+			}
+		}
+	}
+	if let Some(text) = workarea_json {
+		if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+			let (Some(in_), Some(out)) = (
+				value.get("in").and_then(rational_from_json),
+				value.get("out").and_then(rational_from_json),
+			) else {
+				return;
+			};
+			let enabled = value.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+			let mut area = workarea.lock().unwrap_or_else(|e| e.into_inner());
+			area.set_enabled(enabled);
+			area.set_range(quercus_core::TimeRange::new(in_, out));
+		}
+	}
+}
+
 /// An opaque editor session. The mutex serializes session mutations;
 /// project access additionally uses the project's own lock.
 pub struct EditorSessionHandle {
@@ -156,6 +267,7 @@ fn session_from_project_handle(project: *mut ProjectHandle) -> *mut EditorSessio
 	if let Some(id) = first {
 		unsafe { quercus_editor_set_current_sequence(session, id.identity()) };
 	}
+	restore_auxiliary_from_settings(unsafe { &*session });
 	session
 }
 
@@ -420,6 +532,9 @@ pub unsafe extern "C" fn quercus_editor_save(
 	let Some(path) = (unsafe { str_arg(path, path_len) }) else {
 		return quercus_storage::error::QUERCUSSTORAGE_E_INVALID;
 	};
+	// Markers/work area live in the session, not the node graph; stash them
+	// in the project settings so the storage serializer writes them.
+	sync_auxiliary_to_settings(unsafe { &*session });
 	let project = unsafe { quercus_editor_project(session) };
 	let code =
 		unsafe { crate::storage::quercus_storage_save(project, path.as_ptr(), path.len(), options) };

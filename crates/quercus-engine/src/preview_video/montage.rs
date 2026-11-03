@@ -37,7 +37,7 @@ pub(crate) fn preview_media(footage: &FootageBehavior) -> Option<(String, i32)> 
 	}
 }
 
-fn clip_effects(project: &Project, clip: NodeId) -> Vec<MontageEffect> {
+fn clip_effects(project: &Project, clip: NodeId, time: Rational) -> Vec<MontageEffect> {
 	crate::effect::chain(&project.graph, clip)
 		.into_iter()
 		.filter(|&effect| crate::effect::effect_input_of(&project.graph, effect).is_some())
@@ -54,7 +54,7 @@ fn clip_effects(project: &Project, clip: NodeId) -> Vec<MontageEffect> {
 					) && input.flags & quercus_node::input::flags::HIDDEN == 0
 						&& input.id != quercus_node::node::ENABLED_INPUT
 				})
-				.map(|input| (input.id.clone(), entry.core.standard_value(&input.id, -1)))
+				.map(|input| (input.id.clone(), entry.core.value_at_time(&input.id, -1, time)))
 				.collect();
 			Some(MontageEffect {
 				type_id: entry.behavior.type_id().to_string(),
@@ -87,7 +87,7 @@ fn covering_adjustment(
 				in_time: adjustment.core.in_(),
 				out_time: adjustment.core.out(),
 				track_index: below,
-				effects: clip_effects(project, block),
+				effects: clip_effects(project, block, time),
 			});
 		}
 	}
@@ -232,7 +232,7 @@ pub(crate) fn video_montage_with_adjustments(
 					out_time,
 					media_in,
 					gain: 1.0,
-					effects: clip_effects(project, *block_id),
+					effects: clip_effects(project, *block_id, time),
 				});
 			}
 		}
@@ -308,7 +308,7 @@ pub(crate) fn single_track_video_montage(
 			out_time,
 			media_in: clip.core.media_in,
 			gain: 1.0,
-			effects: clip_effects(project, *block_id),
+			effects: clip_effects(project, *block_id, time),
 		});
 	}
 	clips

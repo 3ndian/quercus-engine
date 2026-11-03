@@ -10,7 +10,7 @@ mod project;
 mod parameters;
 pub use parameters::*;
 pub use project::*;
-mod sequence;
+pub(crate) mod sequence;
 pub use sequence::*;
 mod media;
 pub use media::*;

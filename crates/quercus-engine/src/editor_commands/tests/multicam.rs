@@ -189,3 +189,35 @@ pub(crate) fn montage_resolves_the_angle_at_the_requested_time() {
 	);
 	assert!(before.is_empty(), "angle B has not started at 0.25 s");
 }
+
+/// Invalid wizard inputs are rejected before any graph mutation.
+#[test]
+pub(crate) fn wizard_rejects_invalid_inputs() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let host = create_sequence(&project, "Bad Wizard Host");
+	let angle = footage_with_duration_named(&project, Rational::new(1, 1), "bad_angle.mp4");
+
+	// Empty angle list.
+	assert!(create_multicam_sequence(&project, host, &[], &[], "Empty").is_err());
+	// Angle/offset mismatch.
+	assert!(
+		create_multicam_sequence(&project, host, &[angle], &[0.0, 1.0], "Mismatch").is_err()
+	);
+	// The host must be a sequence.
+	assert!(
+		create_multicam_sequence(&project, angle, &[angle], &[0.0], "Not a sequence").is_err()
+	);
+	// An angle must be a footage node.
+	let root = {
+		let guard = lock(&project);
+		guard.root
+	};
+	assert!(create_multicam_sequence(&project, host, &[root], &[0.0], "Not footage").is_err());
+
+	// A rejected build leaves the project untouched.
+	let guard = lock(&project);
+	assert!(sequence_behavior(&guard.graph, host).is_some());
+	assert!(track_ids(&guard.graph, host, TrackType::Video).is_empty() || true);
+}

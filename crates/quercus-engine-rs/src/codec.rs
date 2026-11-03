@@ -1341,9 +1341,10 @@ pub struct EncodingParams {
 	pub video_width: i32,
 	/// The `video_height` field.
 	pub video_height: i32,
-	/// The `video_time_base_num` field.
+	/// Frame **duration** numerator (for 25 fps pass `1`, denominator `25`;
+	/// passing `25/1` makes the export six times too long).
 	pub video_time_base_num: i32,
-	/// The `video_time_base_den` field.
+	/// Frame **duration** denominator (for 25 fps pass `25`).
 	pub video_time_base_den: i32,
 	/// [`crate::types::PixelFormat`] discriminant.
 	pub video_pixel_format: i32,

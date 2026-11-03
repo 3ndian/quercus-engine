@@ -575,3 +575,122 @@ mod tests {
 		let _ = std::fs::remove_file(media);
 	}
 }
+
+#[cfg(test)]
+mod export_regression_tests {
+	use super::*;
+	use crate::edit::EditCommand;
+	use crate::editor::{EditorSession, TrackKind};
+
+	fn init_render() {
+		if !crate::render::manager_init(crate::render::RenderBackend::Threads) {
+			assert!(crate::render::manager_is_initialized());
+		}
+	}
+
+	#[test]
+	fn pure_audio_wav_export_succeeds() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		init_render();
+		let session = EditorSession::new().expect("session");
+		let sequence = session.create_sequence("Audio Only").expect("sequence");
+		let media = crate::test_support::make_test_clip_with_audio("audio_only_export");
+		let footage = session.project().import_footage(&media).expect("footage");
+		session
+			.execute(EditCommand::PlaceFootageClip {
+				footage,
+				kind: TrackKind::Audio,
+				track_index: 0,
+				in_ts: 0,
+				out_ts: 25,
+				media_in_ts: 0,
+			})
+			.expect("place audio");
+
+		let path = std::env::temp_dir()
+			.join(format!("quercus_sdk_audio_only_{}.wav", std::process::id()))
+			.to_string_lossy()
+			.into_owned();
+		// Exercise the same-process audio-then-export path that used to
+		// deadlock: render the audio mix first, then export the sequence.
+		let audio = render_audio(
+			&session.project(),
+			sequence,
+			crate::types::TimeRange::new(
+				crate::types::Rational::new(0, 1),
+				crate::types::Rational::new(1, 1),
+			),
+			48_000,
+			0x3,
+		)
+		.expect("audio render");
+		assert!(audio.wait(), "audio render failed: {}", audio.error());
+		assert!(audio.take_audio().is_some());
+
+		let params = EncodingParams {
+			format: crate::codec::Format::WAV as i32,
+			video_enabled: false,
+			audio_enabled: true,
+			audio_codec: crate::codec::Codec::PCM as i32,
+			audio_sample_rate: 48_000,
+			audio_channel_layout: 0x3,
+			export_length_num: 1,
+			export_length_den: 1,
+			..EncodingParams::default()
+		};
+		let task = export(&session.project(), sequence, &path, &params).expect("export task");
+		assert!(task.wait(), "audio export failed: {}", task.error());
+		assert_eq!(task.state(), TaskState::Succeeded);
+		assert!(std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false));
+		let _ = std::fs::remove_file(&path);
+		let _ = std::fs::remove_file(&media);
+	}
+
+	#[test]
+	fn video_shorter_than_export_range_pads_black() {
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		init_render();
+		let session = EditorSession::new().expect("session");
+		let sequence = session.create_sequence("Short Video").expect("sequence");
+		let media = crate::test_support::make_test_clip("short_video_export");
+		let footage = session.project().import_footage(&media).expect("footage");
+		session
+			.execute(EditCommand::PlaceFootageClip {
+				footage,
+				kind: TrackKind::Video,
+				track_index: 0,
+				in_ts: 0,
+				out_ts: 25,
+				media_in_ts: 0,
+			})
+			.expect("place video");
+
+		let path = std::env::temp_dir()
+			.join(format!("quercus_sdk_short_video_{}.mp4", std::process::id()))
+			.to_string_lossy()
+			.into_owned();
+		let params = EncodingParams {
+			format: crate::codec::Format::MPEG4Video as i32,
+			video_enabled: true,
+			video_codec: crate::codec::Codec::H264 as i32,
+			video_width: 64,
+			video_height: 64,
+			video_time_base_num: 1,
+			video_time_base_den: 25,
+			audio_enabled: false,
+			export_length_num: 3,
+			export_length_den: 1,
+			..EncodingParams::default()
+		};
+		let task = export(&session.project(), sequence, &path, &params).expect("export task");
+		assert!(task.wait(), "padded export failed: {}", task.error());
+		assert_eq!(task.state(), TaskState::Succeeded);
+		assert!(std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false));
+		let _ = std::fs::remove_file(&path);
+		let _ = std::fs::remove_file(&media);
+	}
+}

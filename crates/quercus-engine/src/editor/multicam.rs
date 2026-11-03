@@ -310,3 +310,95 @@ pub unsafe extern "C" fn quercus_editor_multicam_source_at(
 	}
 	index
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The C entry points must reject null/invalid handles before touching the
+	/// project; these are the defensive branches every UI caller relies on.
+	#[test]
+	fn null_and_invalid_inputs_are_rejected() {
+		let session = crate::editor::quercus_editor_new();
+		assert!(!session.is_null());
+		let mut state = QuercusEditorMulticamState::default();
+		unsafe {
+			assert!(!quercus_editor_multicam_state(
+				std::ptr::null(),
+				NodeId::INVALID.identity(),
+				&mut state
+			));
+			assert!(!quercus_editor_multicam_state(session, u64::MAX, &mut state));
+			assert!(!quercus_editor_multicam_state(
+				session,
+				u64::MAX,
+				std::ptr::null_mut()
+			));
+			assert_eq!(
+				quercus_editor_multicam_connected_sequence(std::ptr::null(), 0),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(
+				quercus_editor_multicam_connected_sequence(session, u64::MAX),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert!(!quercus_editor_multicam_is_clip(std::ptr::null(), 0));
+			assert!(!quercus_editor_multicam_is_clip(session, u64::MAX));
+			assert_eq!(
+				quercus_editor_multicam_clip_at(std::ptr::null(), 0, QuercusRational::default()),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(
+				quercus_editor_multicam_clip_at(session, u64::MAX, QuercusRational::default()),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(
+				quercus_editor_multicam_sequence(std::ptr::null(), 0),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(
+				quercus_editor_multicam_sequence(session, u64::MAX),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(
+				quercus_editor_multicam_source_track(std::ptr::null(), 0, 0),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(
+				quercus_editor_multicam_source_track(session, u64::MAX, 0),
+				QUERCUS_NODE_ID_INVALID
+			);
+			assert_eq!(quercus_editor_multicam_source_count(std::ptr::null(), 0), -1);
+			assert_eq!(quercus_editor_multicam_source_count(session, u64::MAX), -1);
+			assert_eq!(
+				quercus_editor_multicam_current_source(std::ptr::null(), 0),
+				-1
+			);
+			assert_eq!(quercus_editor_multicam_current_source(session, u64::MAX), -1);
+			assert_eq!(
+				quercus_editor_multicam_source_name(std::ptr::null(), 0, 0, std::ptr::null_mut(), 0),
+				-1
+			);
+			assert_eq!(
+				quercus_editor_multicam_source_name(session, u64::MAX, -1, std::ptr::null_mut(), 0),
+				-1
+			);
+			assert_eq!(
+				quercus_editor_multicam_source_name(session, u64::MAX, 0, std::ptr::null_mut(), 0),
+				-1
+			);
+			let mut rows = 0;
+			let mut cols = 0;
+			assert!(!quercus_editor_multicam_grid(0, &mut rows, &mut cols));
+			assert!(!quercus_editor_multicam_grid(3, std::ptr::null_mut(), &mut cols));
+			assert!(!quercus_editor_multicam_grid(3, &mut rows, std::ptr::null_mut()));
+			assert!(!quercus_editor_multicam_grid(3, std::ptr::null_mut(), std::ptr::null_mut()));
+			assert_eq!(quercus_editor_multicam_source_at(0, 0.0, 0.0), -1);
+			assert_eq!(quercus_editor_multicam_source_at(3, -0.1, 0.0), -1);
+			assert_eq!(quercus_editor_multicam_source_at(3, 0.0, 1.1), -1);
+			assert_eq!(quercus_editor_multicam_source_at(3, 0.99, 0.99), -1);
+			assert_eq!(quercus_editor_multicam_source_at(3, f64::NAN, 0.0), -1);
+			crate::editor::quercus_editor_release(session);
+		}
+	}
+}

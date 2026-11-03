@@ -9,6 +9,7 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
+use quercus_core::Rational;
 use quercus_node::block::{AdjustmentBlockBehavior, ClipBlockBehavior, GapBlockBehavior, TransitionBlockBehavior};
 use quercus_node::footage::FootageBehavior;
 use quercus_node::folder::FolderBehavior;
@@ -1209,7 +1210,15 @@ pub unsafe extern "C" fn quercus_sequence_length(
 			.get(id)
 			.and_then(|e| e.behavior.as_any())
 			.and_then(|a| a.downcast_ref::<SequenceBehavior>())
-			.map(|s| QuercusRational::from_native(&s.last_length))
+			.map(|s| {
+				let content = crate::editor_commands::sequence::sequence_length(&g.graph, id);
+				let length = if content > Rational::new(0, 1) {
+					content
+				} else {
+					s.last_length
+				};
+				QuercusRational::from_native(&length)
+			})
 	})
 	.flatten()
 	.unwrap_or_default()

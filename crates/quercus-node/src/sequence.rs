@@ -187,6 +187,63 @@ impl SequenceBehavior {
 	}
 }
 
+/// Write a rational as the attribute pair `<prefix>_num`/`<prefix>_den`.
+fn write_rational_attributes(
+	writer: &mut dyn crate::serializer::XmlWrite,
+	prefix: &str,
+	value: quercus_core::Rational,
+) {
+	let numerator = format!("{}_num", prefix);
+	let denominator = format!("{}_den", prefix);
+	writer.attribute(&numerator, &value.numerator().to_string());
+	writer.attribute(&denominator, &value.denominator().to_string());
+}
+
+/// Read a rational from the attribute pair `<prefix>_num`/`<prefix>_den`
+/// (a missing denominator falls back to 1, so the value stays valid).
+fn read_rational_attributes(
+	reader: &dyn crate::serializer::XmlRead,
+	prefix: &str,
+) -> quercus_core::Rational {
+	let numerator = format!("{}_num", prefix);
+	let denominator = format!("{}_den", prefix);
+	let num = reader
+		.attribute(&numerator)
+		.and_then(|v| v.trim().parse::<i64>().ok())
+		.unwrap_or(0);
+	let den = reader
+		.attribute(&denominator)
+		.and_then(|v| v.trim().parse::<i64>().ok())
+		.unwrap_or(1);
+	quercus_core::Rational::new(num, den)
+}
+
+/// Read an integer attribute, falling back to `default` when absent or
+/// malformed (the load path never fails on a missing field).
+fn read_i32_attribute(reader: &dyn crate::serializer::XmlRead, name: &str, default: i32) -> i32 {
+	reader
+		.attribute(name)
+		.and_then(|v| v.trim().parse::<i32>().ok())
+		.unwrap_or(default)
+}
+
+/// Read an unsigned integer attribute with the same fallback rules.
+fn read_u64_attribute(reader: &dyn crate::serializer::XmlRead, name: &str, default: u64) -> u64 {
+	reader
+		.attribute(name)
+		.and_then(|v| v.trim().parse::<u64>().ok())
+		.unwrap_or(default)
+}
+
+/// Read a boolean attribute written as `1`/`0` (also accepts
+/// `true`/`false`); absent means `false`.
+fn read_bool_attribute(reader: &dyn crate::serializer::XmlRead, name: &str) -> bool {
+	matches!(
+		reader.attribute(name).as_deref().map(str::trim),
+		Some("1" | "true")
+	)
+}
+
 impl NodeBehavior for SequenceBehavior {
 	fn name(&self) -> &str {
 		"Sequence"
@@ -221,8 +278,17 @@ impl NodeBehavior for SequenceBehavior {
 
 	/// Custom project save (C++ `Sequence::SaveCustom` writes the
 	/// workarea and markers; those live behind opaque quercustimeline
-	/// handles in Rust, so the track-list references are all that
-	/// persists).
+	/// handles in Rust, so only the track-list references and the
+	/// behavior-owned parameter streams can be written here).
+	///
+	/// The parameter streams are persisted as one compact element per
+	/// stream (attributes only, so no text escaping is needed):
+	///
+	/// ```xml
+	/// <videoparams width="960" height="540" framerate_num="25"
+	///              framerate_den="1" format="4" channels="4" interlaced="0"/>
+	/// <audioparams samplerate="48000" layout="3" format="4"/>
+	/// ```
 	fn save_custom(&self, core: &NodeCore, writer: &mut dyn crate::serializer::XmlWrite) {
 		let _ = core;
 		if !self.track_lists.is_empty() {
@@ -232,17 +298,46 @@ impl NodeBehavior for SequenceBehavior {
 			}
 			writer.end_element(); // tracklists
 		}
+		// Video parameter streams (`ViewerOutput::k_video_params_input`
+		// values live in the behavior, not in the node inputs).
+		for v in &self.video_params {
+			writer.start_element("videoparams");
+			writer.attribute("width", &v.width.to_string());
+			writer.attribute("height", &v.height.to_string());
+			write_rational_attributes(writer, "framerate", v.frame_rate);
+			writer.attribute("format", &v.pixel_format.to_string());
+			writer.attribute("channels", &v.channels.to_string());
+			writer.attribute("interlaced", if v.interlaced { "1" } else { "0" });
+			writer.end_element(); // videoparams
+		}
+		// Audio parameter streams, same convention.
+		for a in &self.audio_params {
+			writer.start_element("audioparams");
+			writer.attribute("samplerate", &a.sample_rate.to_string());
+			writer.attribute("layout", &a.channel_layout.to_string());
+			writer.attribute("format", &a.format.to_string());
+			writer.end_element(); // audioparams
+		}
 	}
 
 	/// Custom project load (C++ `Sequence::LoadCustom`): the track-list
 	/// references are collected here and resolved to live ids by the
-	/// serializer's post-load pass; the C++ workarea/markers segments
-	/// are skipped (opaque handles).
+	/// serializer's post-load pass; the parameter streams are restored
+	/// into the behavior.
+	///
+	/// Backward compatibility: a file without `<videoparams>` /
+	/// `<audioparams>` elements (every pre-existing project, and the C++
+	/// writer) leaves the constructor defaults untouched. Unknown
+	/// elements are skipped.
 	fn load_custom(
 		&mut self,
 		_core: &mut NodeCore,
 		reader: &mut dyn crate::serializer::XmlRead,
 	) -> bool {
+		let mut video_params: Vec<VideoParams> = Vec::new();
+		let mut audio_params: Vec<AudioParams> = Vec::new();
+		let mut has_video_params = false;
+		let mut has_audio_params = false;
 		while reader.next_start_element() {
 			match reader.name() {
 				"tracklists" => {
@@ -258,8 +353,37 @@ impl NodeBehavior for SequenceBehavior {
 						}
 					}
 				}
+				"videoparams" => {
+					has_video_params = true;
+					video_params.push(VideoParams {
+						width: read_i32_attribute(reader, "width", 0),
+						height: read_i32_attribute(reader, "height", 0),
+						frame_rate: read_rational_attributes(reader, "framerate"),
+						pixel_format: read_i32_attribute(reader, "format", 0),
+						channels: read_i32_attribute(reader, "channels", 0),
+						interlaced: read_bool_attribute(reader, "interlaced"),
+					});
+					reader.skip_current_element();
+				}
+				"audioparams" => {
+					has_audio_params = true;
+					audio_params.push(AudioParams {
+						sample_rate: read_i32_attribute(reader, "samplerate", 0),
+						channel_layout: read_u64_attribute(reader, "layout", 0),
+						format: read_i32_attribute(reader, "format", 0),
+					});
+					reader.skip_current_element();
+				}
 				_ => reader.skip_current_element(),
 			}
+		}
+		// Only replace the defaults when the file actually carried the
+		// segments: old files keep the constructor's parameters.
+		if has_video_params {
+			self.video_params = video_params;
+		}
+		if has_audio_params {
+			self.audio_params = audio_params;
 		}
 		true
 	}
@@ -276,5 +400,76 @@ impl NodeBehavior for SequenceBehavior {
 impl Default for SequenceBehavior {
 	fn default() -> Self {
 		SequenceBehavior::new()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::serializer::{XmlRead, XmlWrite};
+
+	/// `save_custom`/`load_custom` round-trip the parameter streams
+	/// through the real XML bridge, and an unknown segment is skipped
+	/// without losing the surrounding data.
+	#[test]
+	fn custom_segment_round_trips_parameter_streams() {
+		let mut seq = SequenceBehavior::new();
+		seq.video_params = vec![VideoParams {
+			width: 960,
+			height: 540,
+			frame_rate: quercus_core::Rational::new(25, 1),
+			pixel_format: 4,
+			channels: 4,
+			interlaced: false,
+		}];
+		seq.audio_params = vec![AudioParams {
+			sample_rate: 48000,
+			channel_layout: 3,
+			format: 4,
+		}];
+
+		let mut writer = crate::serializer::XmlWriterBridge::new().expect("XML writer");
+		writer.start_element("custom");
+		seq.save_custom(&NodeCore::new(), &mut writer);
+		// A segment written by a newer build that this one does not know.
+		writer.start_element("futuresegment");
+		writer.attribute("value", "1");
+		writer.end_element();
+		writer.end_element(); // custom
+		let xml = writer.output();
+		assert!(
+			xml.contains("<videoparams width=\"960\" height=\"540\" framerate_num=\"25\" framerate_den=\"1\" format=\"4\" channels=\"4\" interlaced=\"0\""),
+			"compact video params: {xml}"
+		);
+
+		let mut reader = crate::serializer::XmlReaderBridge::new(&xml).expect("XML reader");
+		assert!(reader.next_start_element(), "positioned on <custom>");
+		let mut loaded = SequenceBehavior::new();
+		assert!(loaded.load_custom(&mut NodeCore::new(), &mut reader));
+		assert_eq!(loaded.video_params, seq.video_params);
+		assert_eq!(loaded.audio_params, seq.audio_params);
+	}
+
+	/// A legacy `<custom>` carrying only `<tracklists>` leaves the
+	/// behavior's parameters untouched (the serializer constructs
+	/// sequences through `create()`, whose defaults must survive).
+	#[test]
+	fn legacy_custom_segment_leaves_parameters_untouched() {
+		let xml = "<custom><tracklists><tracklist>7</tracklist></tracklists></custom>";
+		let mut reader = crate::serializer::XmlReaderBridge::new(xml).expect("XML reader");
+		assert!(reader.next_start_element());
+		let mut seq = SequenceBehavior::new();
+		seq.video_params = vec![VideoParams {
+			width: 1280,
+			height: 720,
+			frame_rate: quercus_core::Rational::new(30000, 1001),
+			pixel_format: 4,
+			channels: 4,
+			interlaced: true,
+		}];
+		assert!(seq.load_custom(&mut NodeCore::new(), &mut reader));
+		assert_eq!(seq.video_params.len(), 1);
+		assert_eq!(seq.video_params[0].width, 1280);
+		assert!(seq.video_params[0].interlaced);
 	}
 }

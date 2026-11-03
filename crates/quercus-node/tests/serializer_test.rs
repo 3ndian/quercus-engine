@@ -940,6 +940,131 @@ fn roundtrip_full_timeline() {
 	assert_eq!(xml, xml2, "re-save is idempotent");
 }
 
+/// Locate the first sequence behavior in a project (the sequence node is
+/// the only node whose behavior downcasts to [`SequenceBehavior`]).
+fn first_sequence(p: &quercus_node::project::Project) -> &quercus_node::sequence::SequenceBehavior {
+	p.graph
+		.node_ids()
+		.into_iter()
+		.find_map(|id| {
+			p.graph
+				.get(id)
+				.and_then(|e| e.behavior.as_any())
+				.and_then(|a| a.downcast_ref::<quercus_node::sequence::SequenceBehavior>())
+		})
+		.expect("project holds a sequence")
+}
+
+/// Sequence parameter streams survive save/load: the behavior's
+/// `video_params` (container format) and `audio_params` are written under
+/// `<custom>` as compact attribute elements and restored on load, and the
+/// re-saved XML is byte-identical.
+#[test]
+fn sequence_parameter_streams_roundtrip() {
+	use quercus_core::Rational;
+	use quercus_node::project::Project;
+	use quercus_node::sequence::SequenceBehavior;
+	use quercus_node::value::{AudioParams, VideoParams};
+
+	let project = Project::new();
+	{
+		let mut p = project.lock().unwrap();
+		p.initialize().unwrap();
+		let (core, mut behavior) = SequenceBehavior::create();
+		let seq = behavior
+			.as_any_mut()
+			.and_then(|a| a.downcast_mut::<SequenceBehavior>())
+			.unwrap();
+		seq.video_params = vec![VideoParams {
+			width: 960,
+			height: 540,
+			frame_rate: Rational::new(25, 1),
+			pixel_format: 4,
+			channels: 4,
+			interlaced: false,
+		}];
+		seq.audio_params = vec![AudioParams {
+			sample_rate: 48000,
+			channel_layout: 3,
+			format: 4,
+		}];
+		p.graph.add_node(core, behavior);
+	}
+
+	let xml = {
+		let p = project.lock().unwrap();
+		quercus_node::serializer::save(&p).unwrap()
+	};
+	// The compact attribute shape (the frame rate is stored as a rational
+	// pair so 25/1, 30000/1001, ... all survive exactly).
+	assert!(
+		xml.contains(
+			"<videoparams width=\"960\" height=\"540\" framerate_num=\"25\" framerate_den=\"1\""
+		),
+		"video parameters are written as attributes: {xml}"
+	);
+	assert!(
+		xml.contains("<audioparams samplerate=\"48000\" layout=\"3\" format=\"4\"/>")
+			|| xml.contains(
+				"<audioparams samplerate=\"48000\" layout=\"3\" format=\"4\"></audioparams>"
+			),
+		"audio parameters are written as attributes: {xml}"
+	);
+
+	let loaded = quercus_node::serializer::load(&xml).unwrap();
+	{
+		let l = loaded.lock().unwrap();
+		let seq = first_sequence(&l);
+		assert_eq!(seq.video_params.len(), 1, "one video stream");
+		assert_eq!(seq.video_params[0].width, 960, "width");
+		assert_eq!(seq.video_params[0].height, 540, "height");
+		assert_eq!(
+			seq.video_params[0].frame_rate,
+			Rational::new(25, 1),
+			"frame rate"
+		);
+		assert_eq!(seq.video_params[0].pixel_format, 4, "pixel format");
+		assert_eq!(seq.video_params[0].channels, 4, "channel count");
+		assert!(!seq.video_params[0].interlaced, "progressive");
+		assert_eq!(seq.audio_params.len(), 1, "one audio stream");
+		assert_eq!(seq.audio_params[0].sample_rate, 48000, "sample rate");
+		assert_eq!(seq.audio_params[0].channel_layout, 3, "channel layout");
+		assert_eq!(seq.audio_params[0].format, 4, "sample format");
+	}
+
+	// The round-trip is stable (attribute order and values re-serialize
+	// identically).
+	let xml2 = {
+		let l = loaded.lock().unwrap();
+		quercus_node::serializer::save(&l).unwrap()
+	};
+	assert_eq!(xml, xml2, "re-save is idempotent");
+}
+
+/// Backward compatibility: a pre-existing file whose sequence `<custom>`
+/// carries only `<tracklists>` (the shape every earlier Rust save and the
+/// C++ fixture use) keeps the constructor's parameter defaults instead of
+/// being zeroed by the new loader.
+#[test]
+fn old_sequence_custom_keeps_default_parameters() {
+	use quercus_node::sequence::SequenceBehavior;
+
+	let xml = r#"<project version="1"><uuid>{legacy}</uuid><nodes><node version="1" id="org.olivevideoeditor.Olive.sequence" ptr="1"><label>Old</label><custom><tracklists><tracklist>2</tracklist></tracklists></custom></node></nodes><settings></settings></project>"#;
+	let project = quercus_node::serializer::load(xml).unwrap();
+	let p = project.lock().unwrap();
+	let seq = first_sequence(&p);
+	let mut defaults = SequenceBehavior::new();
+	defaults.set_default_parameters();
+	assert_eq!(
+		seq.video_params, defaults.video_params,
+		"old files keep the default video parameters"
+	);
+	assert_eq!(
+		seq.audio_params, defaults.audio_params,
+		"old files keep the default audio parameters"
+	);
+}
+
 /// Standalone `MultiCamNode` round-trip: the `current_in` standard value
 /// and the node's type survive save/load (C++
 /// `ProjectSerializer::FileRoundTripPreservesMultiCamNode`).

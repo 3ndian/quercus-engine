@@ -71,7 +71,19 @@ pub(crate) fn execute(session: &mut SessionState, command: EditCommand) -> Resul
 	let sequence = session.current_sequence;
 	match command {
 		// ---- tracks and project/sequence structure ------------------------
-		EditCommand::AddTrack { kind } => value(ops::add_track(project, sequence, track_kind(kind)?)),
+		EditCommand::AddTrack { kind } => {
+			let kind = track_kind(kind)?;
+			let index = ops::add_track(project, sequence, kind)?;
+			let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+			let track = ops::track_ids(&guard.graph, sequence, kind)
+				.get(index)
+				.copied();
+			Ok(EditResult {
+				primary: track.map(|id| id.identity()),
+				value: index as i64,
+				..EditResult::default()
+			})
+		}
 		EditCommand::RemoveTrack { track } => empty(ops::remove_track(project, id(track)?)),
 		EditCommand::SetTrackHeight { track, height } => {
 			ops::set_track_height(project, id(track)?, height);
@@ -250,7 +262,7 @@ pub(crate) fn execute(session: &mut SessionState, command: EditCommand) -> Resul
 				..EditResult::default()
 			})
 		}
-		EditCommand::SplitClip { clip, time_ts } => empty(ops::split_clip(project, id(clip)?, time_ts)),
+		EditCommand::SplitClip { clip, time_ts } => primary(ops::split_clip(project, id(clip)?, time_ts)),
 		EditCommand::SplitClipsPreservingLinks { clips, time_ts } => {
 			empty(ops::split_clips_preserving_links(project, &ids(&clips)?, time_ts))
 		}

@@ -53,6 +53,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use quercus_core::texture::Texture;
 use quercus_core::videoparams::VideoParams;
 use quercus_node::footage::FootageBehavior;
 use quercus_node::sequence::SequenceBehavior;
@@ -73,6 +74,8 @@ use quercus_core::{Rational, TimeRange};
 const TICKET_VIDEO: i32 = ticket_kind::VIDEO;
 /// `quercus_render::ticket::ticket_kind::AUDIO` re-export (loop-local kind).
 const TICKET_AUDIO: i32 = ticket_kind::AUDIO;
+/// Delivery slot for a frame past the picture's end (filled black).
+const TICKET_BLACK: i32 = -1;
 
 /// Overrides applied to a render ticket, mirroring the C++ `ForceParams`
 /// struct in render.h (fields map onto `quercusrender_video_ticket_params`).
@@ -157,6 +160,11 @@ pub struct RenderTask {
 	mode: i32,
 	/// Whether audio ranges are rendered.
 	audio_enabled: bool,
+	/// Whether video frames are rendered.
+	video_enabled: bool,
+	/// End of the picture; frames at/after this time are delivered black
+	/// (video shorter than the audio/export range).
+	video_end: Option<Rational>,
 	/// The range rendered by [`RenderTask::render`].
 	export_range: TimeRange,
 	/// Whether the render loop emits progress itself (the export task
@@ -187,6 +195,8 @@ impl RenderTask {
 			behavior,
 			mode: 0,
 			audio_enabled: false,
+			video_enabled: true,
+			video_end: None,
 			export_range: TimeRange::new(Rational::new(0, 1), Rational::new(0, 1)),
 			native_progress_signalling: true,
 			total_frames: 0,
@@ -207,6 +217,17 @@ impl RenderTask {
 		self.mode = mode;
 		self.audio_enabled = audio_enabled;
 		self.export_range = export_range;
+	}
+
+	/// Enable/disable video tickets (a WAV/audio-only export disables them).
+	pub fn set_video_enabled(&mut self, enabled: bool) {
+		self.video_enabled = enabled;
+	}
+
+	/// Fill frames at/after `end` with black instead of requesting a video
+	/// ticket (video shorter than the export range).
+	pub fn set_video_end(&mut self, end: Option<Rational>) {
+		self.video_end = end;
 	}
 
 	/// Enable/disable the render loop's own progress signalling.
@@ -243,6 +264,28 @@ impl RenderTask {
 		}
 	}
 
+	/// Allocate a zeroed CPU frame for a black pad slot.
+	fn black_texture(&self, time: Rational) -> Option<Texture> {
+		let (width, height) = self.force_size().or_else(|| {
+			self.video_params
+				.as_ref()
+				.map(|params| (params.width(), params.height()))
+		})?;
+		if width <= 0 || height <= 0 {
+			return None;
+		}
+		let mut frame = quercus_core::texture::Frame::new();
+		frame.width = width;
+		frame.height = height;
+		frame.channels = 4;
+		frame.format = quercus_core::PixelFormat::F32;
+		frame.timestamp = time;
+		if !frame.allocate() {
+			return None;
+		}
+		Some(Texture::Cpu(frame))
+	}
+
 	/// The forced output size from [`ForceParams`], or `None`.
 	fn force_size(&self) -> Option<(i32, i32)> {
 		if self.force_params.force_width > 0 && self.force_params.force_height > 0 {
@@ -275,6 +318,7 @@ impl RenderTask {
 	fn clip_effects(
 		graph: &quercus_node::graph::Graph,
 		host: quercus_node::id::NodeId,
+		time: Rational,
 	) -> Vec<MontageEffect> {
 		// Walk the chain: from the host's effect input upstream until an
 		// unconnected input or a node without an effect input; a `seen`
@@ -339,7 +383,10 @@ impl RenderTask {
 					if input.id == quercus_node::node::ENABLED_INPUT {
 						continue;
 					}
-					params.push((input.id.clone(), entry.core.standard_value(&input.id, -1)));
+					params.push((
+						input.id.clone(),
+						entry.core.value_at_time(&input.id, -1, time),
+					));
 				}
 				Some(MontageEffect {
 					type_id: entry.behavior.type_id().to_string(),
@@ -397,6 +444,9 @@ impl RenderTask {
 				else {
 					continue;
 				};
+				if track.muted {
+					continue;
+				}
 				for block_id in &track.blocks {
 					let Some(core) = crate::nodeops::block_core_of(&guard.graph, *block_id) else {
 						continue;
@@ -424,12 +474,36 @@ impl RenderTask {
 						out_time: core.out(),
 						media_in: core.media_in,
 						gain: 1.0,
-						effects: Self::clip_effects(&guard.graph, *block_id),
+						effects: Self::clip_effects(&guard.graph, *block_id, time),
 					});
 				}
 			}
 		}
 		montage
+	}
+
+	/// Pick a footage's audio stream (proxy-aware) for the export montage.
+	/// This mirrors the preview path: the first non-video stream, not
+	/// stream 0 (which is video in most containers).
+	fn audio_media(footage: &FootageBehavior) -> Option<(String, i32)> {
+		let original = footage
+			.streams
+			.iter()
+			.find(|stream| !stream.is_video)
+			.map(|stream| (footage.filename.clone(), stream.index))
+			.or_else(|| (!footage.filename.is_empty()).then(|| (footage.filename.clone(), 1)))?;
+		let use_proxy =
+			quercus_core::configstore::ConfigStore::instance().get_bool(None, "UseProxyMedia", 1) != 0;
+		if use_proxy
+			&& footage.proxy_enabled
+			&& quercus_codec::proxymanager::ProxyManager::get_proxy_state(&footage.proxy)
+				== quercus_codec::proxymanager::ProxyState::Ready
+			&& quercus_codec::proxymanager::ProxyManager::proxy_filename_has_audio(&footage.proxy)
+		{
+			Some((footage.proxy.clone(), 1))
+		} else {
+			Some(original)
+		}
 	}
 
 	/// Flatten the audio tracks of `sequence` into an audio montage
@@ -476,6 +550,9 @@ impl RenderTask {
 				else {
 					continue;
 				};
+				if track.muted {
+					continue;
+				}
 				for block_id in &track.blocks {
 					let Some(core) = crate::nodeops::block_core_of(&guard.graph, *block_id) else {
 						continue;
@@ -496,9 +573,12 @@ impl RenderTask {
 					else {
 						continue;
 					};
+					let Some((filename, stream_index)) = Self::audio_media(footage) else {
+						continue;
+					};
 					montage.push(MontageClip {
-						filename: footage.filename.clone(),
-						stream_index: 0,
+						filename,
+						stream_index,
 						in_time: core.in_(),
 						out_time: core.out(),
 						media_in: core.media_in,
@@ -751,11 +831,18 @@ impl RenderTask {
 		// Compute the frame timestamps (progress denominator mirrors the
 		// C++ `total_length <= 0 -> 1` guard).
 		let mut frame_times: Vec<Rational> = Vec::new();
-		let mut t = self.export_range.in_();
-		while t < self.export_range.out() {
-			frame_times.push(t);
-			t = t + timebase;
+		if self.video_enabled {
+			let mut t = self.export_range.in_();
+			while t < self.export_range.out() {
+				frame_times.push(t);
+				t = t + timebase;
+			}
 		}
+		let video_end = self.video_end.unwrap_or(self.export_range.out());
+		let live_frames = frame_times
+			.iter()
+			.take_while(|t| **t < video_end)
+			.count();
 		self.total_frames = frame_times.len() as i64;
 		let total_length = if frame_times.is_empty() {
 			1.0
@@ -774,9 +861,13 @@ impl RenderTask {
 				time: self.export_range.in_(),
 			});
 		}
-		for &ft in &frame_times {
+		for (index, &ft) in frame_times.iter().enumerate() {
 			slots.push(DeliverySlot {
-				kind: TICKET_VIDEO,
+				kind: if index < live_frames {
+					TICKET_VIDEO
+				} else {
+					TICKET_BLACK
+				},
 				time: ft,
 			});
 		}
@@ -870,7 +961,7 @@ impl RenderTask {
 
 		// Start the initial frame window.
 		if result.is_ok() {
-			while in_flight.len() < window && next_frame_index < frame_times.len() {
+			while in_flight.len() < window && next_frame_index < live_frames {
 				if let Err(e) = self.start_video_ticket(
 					&arena,
 					frame_times[next_frame_index],
@@ -906,7 +997,32 @@ impl RenderTask {
 			}
 
 			// Deliver contiguous results in the observable (timestamp) order.
-			while let Some((_id, ticket_result)) = pending.remove(&next_slot) {
+			while next_slot < total_slots {
+				if slots[next_slot].kind == TICKET_BLACK {
+					match self.black_texture(slots[next_slot].time) {
+						Some(texture) => {
+							if let Err(e) = behavior.frame_downloaded(task, &texture) {
+								result = Err(e);
+								break;
+							}
+						}
+						None => {
+							result = Err(Error::Failed(
+								"Could not allocate a black pad frame".to_string(),
+							));
+							break;
+						}
+					}
+					if self.native_progress_signalling {
+						progress_counter += 1.0;
+						task.emit_progress(progress_counter / total_length);
+					}
+					next_slot += 1;
+					continue;
+				}
+				let Some((_id, ticket_result)) = pending.remove(&next_slot) else {
+					break;
+				};
 				let slot = &slots[next_slot];
 				if slot.kind == TICKET_AUDIO {
 					match ticket_result {
@@ -998,7 +1114,7 @@ impl RenderTask {
 
 			// Refill the window: one new ticket per delivered frame.
 			while in_flight.len().saturating_sub(consumed) < window
-				&& next_frame_index < frame_times.len()
+				&& next_frame_index < live_frames
 			{
 				if let Err(e) = self.start_video_ticket(
 					&arena,
@@ -1749,9 +1865,9 @@ mod tests {
 		// A node without an effect input ends the walk immediately.
 		{
 			let guard = project.lock().unwrap();
-			assert!(RenderTask::clip_effects(&guard.graph, footage).is_empty());
-			assert!(RenderTask::clip_effects(&guard.graph, folder).is_empty());
-			assert!(RenderTask::clip_effects(&guard.graph, NodeId::INVALID).is_empty());
+			assert!(RenderTask::clip_effects(&guard.graph, footage, Rational::new(0, 1)).is_empty());
+			assert!(RenderTask::clip_effects(&guard.graph, folder, Rational::new(0, 1)).is_empty());
+			assert!(RenderTask::clip_effects(&guard.graph, NodeId::INVALID, Rational::new(0, 1)).is_empty());
 		}
 
 		// A clip whose effect input is set but not connected: the walk's
@@ -1763,7 +1879,7 @@ mod tests {
 		);
 		{
 			let guard = project.lock().unwrap();
-			assert!(RenderTask::clip_effects(&guard.graph, bare).is_empty());
+			assert!(RenderTask::clip_effects(&guard.graph, bare, Rational::new(0, 1)).is_empty());
 		}
 
 		// Direct footage -> clip connection: the source node is dropped
@@ -1782,7 +1898,7 @@ mod tests {
 		}
 		{
 			let guard = project.lock().unwrap();
-			assert!(RenderTask::clip_effects(&guard.graph, direct).is_empty());
+			assert!(RenderTask::clip_effects(&guard.graph, direct, Rational::new(0, 1)).is_empty());
 		}
 
 		for enabled in [true, false] {
@@ -1816,7 +1932,7 @@ mod tests {
 				)
 				.expect("effect -> clip");
 
-			let effects = RenderTask::clip_effects(&guard.graph, clip);
+			let effects = RenderTask::clip_effects(&guard.graph, clip, Rational::new(0, 1));
 			assert_eq!(effects.len(), 1);
 			assert_eq!(
 				effects[0].type_id,
@@ -1870,7 +1986,7 @@ mod tests {
 				)
 				.expect("effect -> clip");
 
-			let effects = RenderTask::clip_effects(&guard.graph, clip);
+			let effects = RenderTask::clip_effects(&guard.graph, clip, Rational::new(0, 1));
 			assert_eq!(effects.len(), 1, "{type_name}");
 			assert_eq!(effects[0].type_id, type_name);
 			assert!(
@@ -1945,5 +2061,266 @@ mod tests {
 			calls.fetch_add(1, Ordering::SeqCst);
 		});
 		assert_eq!(calls.load(Ordering::SeqCst), 1, "pump once, then break");
+	}
+}
+
+#[cfg(test)]
+mod audio_export_tests {
+	use super::*;
+	use crate::nodeops::{node_length, video_length, ProjectRef};
+	use quercus_node::footage::StreamInfo;
+	use quercus_node::id::NodeId;
+	use quercus_node::track::TrackType;
+
+	fn project() -> ProjectRef {
+		quercus_node::project::Project::new()
+	}
+
+	fn footage_with_streams(project: &ProjectRef, name: &str) -> NodeId {
+		let (core, behavior) = quercus_node::footage::FootageBehavior::create();
+		let id = project.lock().unwrap().graph.add_node(core, behavior);
+		let mut guard = project.lock().unwrap();
+		let f = guard
+			.graph
+			.get_mut(id)
+			.and_then(|e| e.behavior.as_any_mut())
+			.and_then(|a| a.downcast_mut::<quercus_node::footage::FootageBehavior>())
+			.unwrap();
+		f.filename = name.to_string();
+		f.streams.push(StreamInfo {
+			index: 0,
+			is_video: true,
+			video: None,
+			audio: None,
+			duration: Rational::new(5, 1),
+		});
+		f.streams.push(StreamInfo {
+			index: 2,
+			is_video: false,
+			video: None,
+			audio: None,
+			duration: Rational::new(5, 1),
+		});
+		id
+	}
+
+	fn sequence_with_track(project: &ProjectRef, kind: TrackType) -> (NodeId, NodeId) {
+		let (core, behavior) = quercus_node::sequence::SequenceBehavior::create();
+		let sequence = project.lock().unwrap().graph.add_node(core, behavior);
+		let (core, behavior) = quercus_node::track::TrackListBehavior::create();
+		let list = project.lock().unwrap().graph.add_node(core, behavior);
+		let (core, behavior) = quercus_node::track::TrackBehavior::create();
+		let track = project.lock().unwrap().graph.add_node(core, behavior);
+		let mut guard = project.lock().unwrap();
+		guard
+			.graph
+			.get_mut(list)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<TrackListBehavior>()
+			.unwrap()
+			.kind = kind;
+		guard
+			.graph
+			.get_mut(track)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<TrackBehavior>()
+			.unwrap()
+			.kind = kind;
+		guard
+			.graph
+			.get_mut(sequence)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<SequenceBehavior>()
+			.unwrap()
+			.track_lists
+			.push(list);
+		guard
+			.graph
+			.get_mut(list)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<TrackListBehavior>()
+			.unwrap()
+			.tracks
+			.push(track);
+		(sequence, track)
+	}
+
+	fn clip_on(project: &ProjectRef, footage: NodeId, track: NodeId, range: TimeRange) -> NodeId {
+		let (core, behavior) = quercus_node::block::clip_create();
+		let clip = project.lock().unwrap().graph.add_node(core, behavior);
+		{
+			let mut guard = project.lock().unwrap();
+			guard
+				.graph
+				.get_mut(clip)
+				.unwrap()
+				.behavior
+				.as_any_mut()
+				.unwrap()
+				.downcast_mut::<quercus_node::block::ClipBlockBehavior>()
+				.unwrap()
+				.core
+				.range = range;
+		}
+		crate::nodeops::clip_set_footage(project, clip, footage);
+		crate::nodeops::track_append_block(project, track, clip);
+		clip
+	}
+
+	#[test]
+	fn audio_montage_uses_the_audio_stream_and_skips_muted() {
+		let project = project();
+		let (sequence, track) = sequence_with_track(&project, TrackType::Audio);
+		let footage = footage_with_streams(&project, "clip.mp4");
+		clip_on(
+			&project,
+			footage,
+			track,
+			TimeRange::new(Rational::new(0, 1), Rational::new(2, 1)),
+		);
+		let montage = RenderTask::audio_montage(&project, sequence, Rational::new(1, 1));
+		assert_eq!(montage.len(), 1);
+		assert_eq!(montage[0].filename, "clip.mp4");
+		assert_eq!(montage[0].stream_index, 2, "stream 0 is video");
+
+		{
+			let mut guard = project.lock().unwrap();
+			guard
+				.graph
+				.get_mut(track)
+				.unwrap()
+				.behavior
+				.as_any_mut()
+				.unwrap()
+				.downcast_mut::<TrackBehavior>()
+				.unwrap()
+				.muted = true;
+		}
+		assert!(RenderTask::audio_montage(&project, sequence, Rational::new(1, 1)).is_empty());
+	}
+
+	#[test]
+	fn video_montage_skips_muted_tracks_and_video_length_ignores_audio() {
+		let project = project();
+		let (sequence, track) = sequence_with_track(&project, TrackType::Video);
+		let footage = footage_with_streams(&project, "clip.mp4");
+		clip_on(
+			&project,
+			footage,
+			track,
+			TimeRange::new(Rational::new(0, 1), Rational::new(2, 1)),
+		);
+		assert_eq!(RenderTask::video_montage(&project, sequence, Rational::new(1, 1)).len(), 1);
+		{
+			let mut guard = project.lock().unwrap();
+			guard
+				.graph
+				.get_mut(track)
+				.unwrap()
+				.behavior
+				.as_any_mut()
+				.unwrap()
+				.downcast_mut::<TrackBehavior>()
+				.unwrap()
+				.muted = true;
+		}
+		assert!(RenderTask::video_montage(&project, sequence, Rational::new(1, 1)).is_empty());
+
+		assert_eq!(node_length(&project, sequence), Rational::new(2, 1));
+		assert_eq!(video_length(&project, sequence), Rational::new(2, 1));
+	}
+}
+
+#[cfg(test)]
+mod keyframe_export_tests {
+	use super::*;
+	use quercus_node::keyframe::{Interpolation, Keyframe};
+	use quercus_node::node::ENABLED_INPUT;
+	use quercus_node::value::NodeValue;
+
+	#[test]
+	fn clip_effects_samples_keyframes_at_the_requested_time() {
+		let project = quercus_node::project::Project::new();
+		let footage = {
+			let (core, behavior) = quercus_node::footage::FootageBehavior::create();
+			project.lock().unwrap().graph.add_node(core, behavior)
+		};
+		let (ccore, cbehavior) = quercus_node::block::clip_create();
+		let clip = project.lock().unwrap().graph.add_node(ccore, cbehavior);
+		let (ecore, ebehavior) = quercus_node::factory::Factory::global()
+			.create_any("org.olivevideoeditor.Olive.opacity")
+			.expect("opacity registered");
+		let mut guard = project.lock().unwrap();
+		let effect = guard.graph.add_node(ecore, ebehavior);
+		guard
+			.graph
+			.get_mut(effect)
+			.unwrap()
+			.core
+			.set_standard_value(ENABLED_INPUT, -1, NodeValue::Boolean(true));
+		// Static standard value 0.5, overridden by keyframes 0 -> 1.
+		guard
+			.graph
+			.get_mut(effect)
+			.unwrap()
+			.core
+			.set_standard_value("opacity_in", -1, NodeValue::Float(0.5));
+		guard
+			.graph
+			.get_mut(effect)
+			.unwrap()
+			.core
+			.keyframe_track_mut("opacity_in", -1)
+			.set_key(Keyframe {
+				time: Rational::new(0, 1),
+				value: NodeValue::Float(0.0),
+				interpolation: Interpolation::Linear,
+				bezier_in: (0.0, 0.0),
+				bezier_out: (0.0, 0.0),
+			});
+		guard
+			.graph
+			.get_mut(effect)
+			.unwrap()
+			.core
+			.keyframe_track_mut("opacity_in", -1)
+			.set_key(Keyframe {
+				time: Rational::new(2, 1),
+				value: NodeValue::Float(1.0),
+				interpolation: Interpolation::Linear,
+				bezier_in: (0.0, 0.0),
+				bezier_out: (0.0, 0.0),
+			});
+		guard.graph.connect(footage, effect, "tex_in", -1).unwrap();
+		guard
+			.graph
+			.connect(effect, clip, quercus_node::block::clip_input::TEXTURE_INPUT, -1)
+			.unwrap();
+
+		let value_at = |time: Rational| {
+			let effects = RenderTask::clip_effects(&guard.graph, clip, time);
+			let effect = effects.first().expect("effect");
+			effect
+				.params
+				.iter()
+				.find(|(id, _)| id == "opacity_in")
+				.map(|(_, value)| value.to_double())
+				.expect("opacity param")
+		};
+		assert!((value_at(Rational::new(0, 1)) - 0.0).abs() < 1e-9);
+		assert!((value_at(Rational::new(1, 1)) - 0.5).abs() < 1e-9);
+		assert!((value_at(Rational::new(2, 1)) - 1.0).abs() < 1e-9);
 	}
 }

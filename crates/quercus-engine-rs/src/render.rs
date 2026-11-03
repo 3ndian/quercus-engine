@@ -64,6 +64,14 @@ unsafe extern "C" {
 /// Renders a sequence or video-footage viewer at `time`, returning tight
 /// F32 RGBA pixels (`width*height*4` floats). None on failure (unknown
 /// viewer, invalid size, render error).
+///
+/// **Color space**: the returned samples are in the project's *working*
+/// color space (ACEScg linear by default), not display/sRGB. Writing them
+/// straight to PNG makes the image look dark (a working-space 0.18 can map
+/// to a very different display code). Apply
+/// [`crate::utils::working_to_display_target`] with the project's working
+/// and delivery color spaces before display, or use the same transform the
+/// export pipeline uses.
 pub fn render_frame_f32(
 	project: &Project,
 	viewer: NodeId,

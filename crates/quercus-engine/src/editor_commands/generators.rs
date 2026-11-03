@@ -343,7 +343,7 @@ pub fn place_footage_clips_linked(
 /// Split `clip` at `time_ts` (a frame timestamp strictly inside the
 /// clip's range), undoable "Split Clip" (the module's
 /// `BlockSplitCommand`).
-pub fn split_clip(p: &ProjectRef, clip: NodeId, time_ts: i64) -> Result<(), String> {
+pub fn split_clip(p: &ProjectRef, clip: NodeId, time_ts: i64) -> Result<NodeId, String> {
 	let (tb, in_r, out_r) = {
 		let g = lock(p);
 		let tb = clip_track(&g.graph, clip)
@@ -366,7 +366,19 @@ pub fn split_clip(p: &ProjectRef, clip: NodeId, time_ts: i64) -> Result<(), Stri
 	push(
 		quercus_timeline::undosplit::BlockSplitCommand::new(node_ref(p, clip), point).to_command(),
 		"Split Clip",
-	)
+	)?;
+	// The split command creates the rear half; resolve it so callers can
+	// return a primary node (SDK consumers no longer need a snapshot diff).
+	let g = lock(p);
+	let track = clip_track(&g.graph, clip).ok_or_else(|| "the clip has no track".to_string())?;
+	clip_ids(&g.graph, track)
+		.into_iter()
+		.find(|&block| {
+			block != clip
+				&& clip_range(&g.graph, block)
+					.is_some_and(|(in_r, _, _)| in_r == point)
+		})
+		.ok_or_else(|| "the split command produced no rear half".to_string())
 }
 
 /// Split every clip of `blocks` at `time_ts` as ONE undoable
