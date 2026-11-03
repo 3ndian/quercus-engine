@@ -7,6 +7,12 @@ use quercus_node::footage::StreamInfo;
 /// A footage node with one probed video stream of `duration` seconds. The
 /// wizard only reads the footage duration, so no media needs encoding.
 fn footage_with_duration(project: &ProjectRef, duration: Rational) -> NodeId {
+	footage_with_duration_named(project, duration, "")
+}
+
+/// Like [`footage_with_duration`], with a filename so the preview montage
+/// can resolve the angle's media (an empty filename is not playable).
+fn footage_with_duration_named(project: &ProjectRef, duration: Rational, name: &str) -> NodeId {
 	let mut guard = lock(project);
 	let (core, behavior) = FootageBehavior::create();
 	let id = guard.graph.add_node(core, behavior);
@@ -16,6 +22,7 @@ fn footage_with_duration(project: &ProjectRef, duration: Rational) -> NodeId {
 		.and_then(|entry| entry.behavior.as_any_mut())
 		.and_then(|behavior| behavior.downcast_mut::<FootageBehavior>())
 	{
+		footage.filename = name.to_string();
 		footage.streams.push(StreamInfo {
 			index: 0,
 			is_video: true,
@@ -139,4 +146,46 @@ pub(crate) fn enabling_multicam_twice_is_idempotent() {
 		Some(first.multicam)
 	);
 	quercus_undo::global::clear().unwrap();
+}
+
+
+/// Playback must resolve the angle covering the requested time, not the
+/// angle covering the host clip's in-point. With a 0.5 s offset, switching
+/// to angle B and playing at 0.75 s used to produce no media at all.
+#[test]
+pub(crate) fn montage_resolves_the_angle_at_the_requested_time() {
+	let _g = test_lock();
+	quercus_undo::global::clear().unwrap();
+	let project = create_project();
+	let host = create_sequence(&project, "Multicam Playback");
+	let angle_a = footage_with_duration_named(&project, Rational::new(1, 1), "angle_a.mp4");
+	let angle_b = footage_with_duration_named(&project, Rational::new(1, 1), "angle_b.mp4");
+	let built = create_multicam_sequence(
+		&project,
+		host,
+		&[angle_a, angle_b],
+		&[0.0, 0.5],
+		"Playback Multi-Cam",
+	)
+	.expect("build multicam sequence");
+	switch_multicam(&project, built.host_clip, 1, false, Rational::new(0, 1))
+		.expect("switch to angle B");
+
+	let guard = lock(&project);
+	let (clips, adjustments) = crate::preview_video::montage::video_montage_with_adjustments(
+		&guard,
+		host,
+		Rational::new(3, 4),
+	);
+	assert!(adjustments.is_empty());
+	assert_eq!(clips.len(), 1, "the switched angle should render at 0.75 s");
+	assert_eq!(clips[0].filename, "angle_b.mp4");
+
+	// Before angle B's offset the montage has no angle to read.
+	let (before, _) = crate::preview_video::montage::video_montage_with_adjustments(
+		&guard,
+		host,
+		Rational::new(1, 4),
+	);
+	assert!(before.is_empty(), "angle B has not started at 0.25 s");
 }

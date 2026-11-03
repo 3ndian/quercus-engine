@@ -1,6 +1,6 @@
 //! Owned video frames with explicit source and pixel-format metadata.
 
-mod montage;
+pub(crate) mod montage;
 
 use quercus_core::{PixelFormat, Rational};
 use quercus_node::footage::FootageBehavior;

@@ -98,6 +98,7 @@ fn multicam_media(
 	project: &Project,
 	clip: NodeId,
 	host_in: Rational,
+	time: Rational,
 ) -> Option<(String, i32, Rational)> {
 	let multicam = project
 		.graph
@@ -124,7 +125,7 @@ fn multicam_media(
 	let track = ops::track_behavior(&project.graph, track)?;
 	track.blocks.iter().find_map(|&block| {
 		let clip = ops::clip_behavior(&project.graph, block)?;
-		if host_in < clip.core.in_() || host_in >= clip.core.out() {
+		if time < clip.core.in_() || time >= clip.core.out() {
 			return None;
 		}
 		let footage_id = ops::find_input_footage(&project.graph, block)?;
@@ -193,9 +194,21 @@ pub(crate) fn video_montage_with_adjustments(
 				if time < in_time || time >= out_time {
 					continue;
 				}
+				let is_multicam = project
+					.graph
+					.connected_output(*block_id, clip_input::TEXTURE_INPUT, -1)
+					.and_then(|source| project.graph.get(source))
+					.is_some_and(|entry| {
+						entry.behavior.type_id() == "org.olivevideoeditor.Olive.multicam"
+					});
 				let (filename, stream_index, media_in) =
-					match multicam_media(project, *block_id, in_time) {
+					match multicam_media(project, *block_id, in_time, time) {
 						Some(media) => media,
+						// A multicam clip whose current angle has no media at
+						// this time must stay transparent: falling back to any
+						// footage reachable through the graph would show the
+						// wrong angle.
+						None if is_multicam => continue,
 						None => {
 							let Some(footage_id) =
 								ops::find_input_footage(&project.graph, *block_id)
