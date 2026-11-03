@@ -574,6 +574,7 @@ fn submit_audio(
 		sample_rate: 48000,
 		channel_layout: 0x3,
 		montage: Vec::new(),
+		bus_effects: Vec::new(),
 	});
 	let results = results.clone();
 	let job = Job {
@@ -825,6 +826,7 @@ fn oversized_audio_ticket_is_refused_by_process_backend() {
 		sample_rate: 48000,
 		channel_layout: 0x3,
 		montage: Vec::new(),
+		bus_effects: Vec::new(),
 	});
 	let job = Job {
 		node_identity: 1,

@@ -1049,12 +1049,18 @@ impl WorkerSession {
 			.iter()
 			.map(crate::worker::ipc::montage_clip_from)
 			.collect();
+		let bus_effects = spec
+			.bus_effects
+			.iter()
+			.map(crate::worker::ipc::montage_audio_effect_from)
+			.collect();
 		Ok(AudioTicketParams {
 			viewer: self.graph.as_ref().map(|g| g.project_copy).unwrap_or(0),
 			range: quercus_core::TimeRange::new(start, start + duration),
 			sample_rate: spec.sample_rate,
 			channel_layout: spec.channel_layout,
 			montage,
+			bus_effects,
 		})
 	}
 

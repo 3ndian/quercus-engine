@@ -36,6 +36,20 @@ pub const AUDIO_EFFECT_EQ_TYPE_ID: &str = "org.olivevideoeditor.Olive.eq";
 /// Dynamics compressor effect type id (built into the clip mixer).
 pub const AUDIO_EFFECT_COMPRESSOR_TYPE_ID: &str = "org.olivevideoeditor.Olive.compressor";
 
+/// Brick-wall limiter effect type id (built into the clip mixer and the
+/// sequence master bus).
+pub const AUDIO_EFFECT_LIMITER_TYPE_ID: &str = "org.olivevideoeditor.Olive.limiter";
+
+/// Noise gate effect type id (built into the clip mixer and the sequence
+/// master bus).
+pub const AUDIO_EFFECT_GATE_TYPE_ID: &str = "org.olivevideoeditor.Olive.gate";
+
+/// Sidechain ducker effect type id. Unlike the other built-ins this one is
+/// only meaningful on a clip: its sidechain is the already-mixed sequence
+/// accumulator at that clip's position (see [`ClipAudioEffect`] and the
+/// renderer docs).
+pub const AUDIO_EFFECT_DUCKING_TYPE_ID: &str = "org.olivevideoeditor.Olive.ducking";
+
 /// Volume effect parameter input id (`volume_in`).
 pub const AUDIO_VOLUME_INPUT: &str = "volume_in";
 
@@ -58,16 +72,41 @@ pub const AUDIO_COMP_ATTACK_INPUT: &str = "attack_ms";
 pub const AUDIO_COMP_RELEASE_INPUT: &str = "release_ms";
 /// Compressor makeup gain in dB.
 pub const AUDIO_COMP_MAKEUP_INPUT: &str = "makeup_db";
+/// Limiter ceiling in dBFS.
+pub const AUDIO_LIMITER_CEILING_INPUT: &str = "ceiling_db";
+/// Limiter release time in milliseconds.
+pub const AUDIO_LIMITER_RELEASE_INPUT: &str = "release_ms";
+/// Gate threshold in dBFS.
+pub const AUDIO_GATE_THRESHOLD_INPUT: &str = "threshold_db";
+/// Gate attack time in milliseconds.
+pub const AUDIO_GATE_ATTACK_INPUT: &str = "attack_ms";
+/// Gate release time in milliseconds.
+pub const AUDIO_GATE_RELEASE_INPUT: &str = "release_ms";
+/// Gate hold time in milliseconds.
+pub const AUDIO_GATE_HOLD_INPUT: &str = "hold_ms";
+/// Ducking detector threshold in dBFS.
+pub const AUDIO_DUCKING_THRESHOLD_INPUT: &str = "threshold_db";
+/// Ducking gain reduction in dB (negative).
+pub const AUDIO_DUCKING_AMOUNT_INPUT: &str = "amount_db";
+/// Ducking attack time in milliseconds.
+pub const AUDIO_DUCKING_ATTACK_INPUT: &str = "attack_ms";
+/// Ducking release time in milliseconds.
+pub const AUDIO_DUCKING_RELEASE_INPUT: &str = "release_ms";
 
 /// One entry of a clip's audio effect chain.
 ///
 /// The chain lives on the clip (rather than being resolved from graph
 /// connections) so that the montage builder, the mixer and the C ABI all
-/// see the same ordered list. Only built-in float-parameter effects are
-/// represented in Phase 1 (`Volume`, `Pan`); an unknown `type_id` is
-/// carried through and skipped with a one-shot render warning. Dynamic
-/// parameters (keyframes) and graph-attached OFX audio effects remain a
-/// Phase-2 follow-up.
+/// see the same ordered list. The built-in float-parameter effects are
+/// `Volume`, `Pan`, `EQ`, `Compressor`, `Limiter`, `Gate` and `Ducking`;
+/// an unknown `type_id` is carried through and skipped with a one-shot
+/// render warning. Dynamic parameters (keyframes) and graph-attached OFX
+/// audio effects remain a Phase-2 follow-up.
+///
+/// `Ducking` is a sidechain effect: its detector is the already-mixed
+/// sequence accumulator at this clip's position (clips are mixed in
+/// montage order, so earlier dialogue ducks later music). It never reads
+/// future clips and is bypassed on the master bus, which has no sidechain.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipAudioEffect {
 	/// Effect type id (`org.olivevideoeditor.Olive.volume` / `.pan`).

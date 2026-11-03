@@ -719,6 +719,9 @@ pub struct AudioTicketSpec {
 	pub channels: i32,
 	/// Sequence montage (ordered topmost-last; empty = silence).
 	pub montage: Vec<WireMontageClip>,
+	/// Sequence master-bus chain (protocol v2 additive: older peers omit
+	/// the field and it defaults to no bus processing).
+	pub bus_effects: Vec<WireMontageAudioEffect>,
 }
 
 /// `render_audio_batch` (main->worker, M15 S3) — a batch of audio range
@@ -2636,6 +2639,14 @@ mod tests {
 					audio_effects: vec![],
 					effects: vec![],
 				}],
+				bus_effects: vec![WireMontageAudioEffect {
+					type_id: "org.olivevideoeditor.Olive.limiter".into(),
+					enabled: true,
+					params: vec![WireEffectParam {
+						input: "ceiling_db".into(),
+						value: WireNodeValue::Float(-1.0),
+					}],
+				}],
 			}],
 		};
 		let value = serde_json::to_value(&batch).unwrap();
@@ -2647,6 +2658,10 @@ mod tests {
 		assert_eq!(value["tickets"][0]["channels"], 2);
 		assert_eq!(value["tickets"][0]["duration_num"], 1600);
 		assert_eq!(value["tickets"][0]["montage"][0]["filename"], "a.mp4");
+		assert_eq!(
+			value["tickets"][0]["bus_effects"][0]["type_id"],
+			"org.olivevideoeditor.Olive.limiter"
+		);
 		let round: RenderAudioBatchMsg = serde_json::from_value(value).unwrap();
 		assert_eq!(round, batch);
 		// Defaults: a bare audio ticket parses (missing fields default).
@@ -2655,6 +2670,7 @@ mod tests {
 		assert_eq!(bare.slot, 2);
 		assert_eq!(bare.sample_rate, 0);
 		assert!(bare.montage.is_empty());
+		assert!(bare.bus_effects.is_empty(), "v2 additive bus field defaults");
 	}
 
 	#[test]

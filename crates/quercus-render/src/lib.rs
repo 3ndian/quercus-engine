@@ -49,6 +49,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod audio;
 pub mod autocacher;
 pub mod cache;
 pub mod cancelatom;

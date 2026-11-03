@@ -251,7 +251,7 @@ pub(crate) fn render_audio(
 	if range.out() <= range.in_() || sample_rate <= 0 || channel_layout == 0 {
 		return Err("invalid audio range or output layout".into());
 	}
-	let montage = {
+	let (montage, bus_effects) = {
 		let guard = project.lock().unwrap_or_else(|e| e.into_inner());
 		if guard
 			.graph
@@ -260,7 +260,10 @@ pub(crate) fn render_audio(
 			.and_then(|behavior| behavior.downcast_ref::<SequenceBehavior>())
 			.is_some()
 		{
-			audio_montage(&guard, viewer, range)
+			(
+				audio_montage(&guard, viewer, range),
+				quercus_render::audio::load_bus_effects(&guard.settings, viewer.identity()),
+			)
 		} else {
 			let footage = guard
 				.graph
@@ -271,19 +274,22 @@ pub(crate) fn render_audio(
 			let (filename, stream_index) = preview_media(footage).ok_or("footage has no audio")?;
 			{
 				let audio = MontageAudio::default();
-				vec![MontageClip {
-					filename,
-					stream_index,
-					in_time: range.in_(),
-					out_time: range.out(),
-					media_in: range.in_(),
-					gain: audio.gain,
-					pan: audio.pan,
-					fade_in: audio.fade_in,
-					fade_out: audio.fade_out,
-					effects: Vec::new(),
-					audio_effects: audio.effects,
-				}]
+				(
+					vec![MontageClip {
+						filename,
+						stream_index,
+						in_time: range.in_(),
+						out_time: range.out(),
+						media_in: range.in_(),
+						gain: audio.gain,
+						pan: audio.pan,
+						fade_in: audio.fade_in,
+						fade_out: audio.fade_out,
+						effects: Vec::new(),
+						audio_effects: audio.effects,
+					}],
+					Vec::new(),
+				)
 			}
 		}
 	};
@@ -293,6 +299,7 @@ pub(crate) fn render_audio(
 		sample_rate,
 		channel_layout,
 		montage,
+		bus_effects,
 	};
 	let samples = if let Some(manager) = RenderManager::global() {
 		let id = manager.tickets.next_id();
@@ -326,4 +333,37 @@ pub(crate) fn render_audio(
 		channel_count: samples.channel_count,
 		samples: samples.samples,
 	})
+}
+
+/// The sequence's audio output `(sample_rate, channel_layout)`, defaulting
+/// to the sequence defaults for a stale/non-sequence viewer.
+pub(crate) fn sequence_audio_params(
+	project: &Project,
+	sequence: NodeId,
+) -> (i32, u64) {
+	let Some(params) = project
+		.graph
+		.get(sequence)
+		.and_then(|entry| entry.behavior.as_any())
+		.and_then(|behavior| behavior.downcast_ref::<SequenceBehavior>())
+		.and_then(|sequence| sequence.audio_params.first())
+	else {
+		return (48_000, 0x3);
+	};
+	(params.sample_rate.max(1), params.channel_layout.max(1))
+}
+
+/// Mix one sequence range through the normal public preview-audio path,
+/// using the sequence's own audio parameters. Used by the loudness
+/// measurement ABI so it evaluates exactly what playback/export would.
+pub(crate) fn render_sequence_audio(
+	project: std::sync::Arc<std::sync::Mutex<Project>>,
+	sequence: NodeId,
+	range: TimeRange,
+) -> Result<AudioBufferData, String> {
+	let (sample_rate, channel_layout) = {
+		let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+		sequence_audio_params(&guard, sequence)
+	};
+	render_audio(project, sequence, range, sample_rate, channel_layout)
 }

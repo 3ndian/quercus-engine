@@ -2616,6 +2616,11 @@ pub fn audio_samples_byte_len(params: &crate::ticket::AudioTicketParams) -> Resu
 /// `channels` is the output channel count. Pan affects the first two
 /// channels only (mono output is unpanned; extra channels only get the
 /// gain/fade/effects).
+///
+/// `sidechain` is the already-mixed sequence accumulator over the same
+/// frame window (the previous clips in montage order, interleaved exactly
+/// like `buf`). Ducking effects read it; all other effects ignore it.
+/// Future clips never contribute because they have not been mixed yet.
 fn process_clip_audio(
     buf: &mut [f32],
     frames: usize,
@@ -2623,6 +2628,7 @@ fn process_clip_audio(
     clip: &crate::ticket::MontageClip,
     first_time: f64,
     rate: i32,
+    sidechain: Option<&[f32]>,
 ) {
     let channels = channels.max(1);
     let rate = rate.max(1) as f64;
@@ -2686,7 +2692,7 @@ fn process_clip_audio(
     }
 
     for effect in &clip.audio_effects {
-        apply_audio_effect(buf, frames, channels, effect, rate);
+        apply_audio_effect(buf, frames, channels, effect, rate, sidechain);
     }
 }
 
@@ -2784,12 +2790,196 @@ fn apply_compressor(
     }
 }
 
+/// Brick-wall peak limiter with an instantaneous attack and an
+/// exponential release. The envelope gain is the minimum of the gain
+/// needed to put the current sample frame under the ceiling and the
+/// released previous gain, so the output never exceeds `ceiling_db`
+/// (a final sample clamp guarantees the bound even after f32 rounding).
+fn apply_limiter(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    effect: &crate::ticket::MontageAudioEffect,
+    rate: f64,
+) {
+    let rate = rate.max(1.0);
+    let ceiling_db = effect_param(
+        effect,
+        quercus_node::block::AUDIO_LIMITER_CEILING_INPUT,
+        -1.0,
+    )
+    .clamp(-60.0, 0.0);
+    let release_ms = effect_param(
+        effect,
+        quercus_node::block::AUDIO_LIMITER_RELEASE_INPUT,
+        50.0,
+    )
+    .clamp(1.0, 5_000.0);
+    let ceiling = 10f64.powf(ceiling_db / 20.0) as f32;
+    let release = (-1.0f64 / (rate * release_ms / 1_000.0)).exp() as f32;
+    let mut envelope = 1.0f32;
+    for frame in 0..frames {
+        let mut peak = 0.0f32;
+        for channel in 0..channels {
+            peak = peak.max(buf[frame * channels + channel].abs());
+        }
+        let required = if peak > ceiling { ceiling / peak } else { 1.0 };
+        if required < envelope {
+            // Instant attack: reduce the gain on this sample.
+            envelope = required;
+        } else {
+            envelope = release * envelope + (1.0 - release) * 1.0;
+        }
+        for channel in 0..channels {
+            let index = frame * channels + channel;
+            buf[index] = (buf[index] * envelope).clamp(-ceiling, ceiling);
+        }
+    }
+}
+
+/// Sample-peak noise gate with attack/release smoothing and a hold time.
+///
+/// The detector is linked across channels (the frame peak). A frame at or
+/// above `threshold_db` opens the gate and resets the hold counter; frames
+/// below threshold stay open until the hold expires, then the gain
+/// releases toward silence. The gate starts open so the first transient is
+/// not swallowed.
+fn apply_gate(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    effect: &crate::ticket::MontageAudioEffect,
+    rate: f64,
+) {
+    let rate = rate.max(1.0);
+    let threshold_db = effect_param(
+        effect,
+        quercus_node::block::AUDIO_GATE_THRESHOLD_INPUT,
+        -40.0,
+    )
+    .clamp(-100.0, 0.0);
+    let attack_ms = effect_param(
+        effect,
+        quercus_node::block::AUDIO_GATE_ATTACK_INPUT,
+        5.0,
+    )
+    .clamp(0.1, 1_000.0);
+    let release_ms = effect_param(
+        effect,
+        quercus_node::block::AUDIO_GATE_RELEASE_INPUT,
+        100.0,
+    )
+    .clamp(1.0, 5_000.0);
+    let hold_ms = effect_param(
+        effect,
+        quercus_node::block::AUDIO_GATE_HOLD_INPUT,
+        20.0,
+    )
+    .clamp(0.0, 5_000.0);
+    let threshold = 10f64.powf(threshold_db / 20.0) as f32;
+    let attack = (-1.0f64 / (rate * attack_ms / 1_000.0)).exp() as f32;
+    let release = (-1.0f64 / (rate * release_ms / 1_000.0)).exp() as f32;
+    let hold_frames = (rate * hold_ms / 1_000.0).round() as usize;
+    let mut hold = 0usize;
+    let mut gain = 1.0f32;
+    for frame in 0..frames {
+        let mut peak = 0.0f32;
+        for channel in 0..channels {
+            peak = peak.max(buf[frame * channels + channel].abs());
+        }
+        let target = if peak >= threshold {
+            hold = hold_frames;
+            1.0
+        } else if hold > 0 {
+            hold -= 1;
+            1.0
+        } else {
+            0.0
+        };
+        let coeff = if target > gain { attack } else { release };
+        gain = coeff * gain + (1.0 - coeff) * target;
+        for channel in 0..channels {
+            buf[frame * channels + channel] *= gain;
+        }
+    }
+}
+
+/// Sidechain ducker: when the detector (the already-mixed sequence
+/// accumulator) is at or above `threshold_db`, the clip is attenuated by
+/// `amount_db` with attack/release smoothing.
+///
+/// The sidechain is the montage accumulator at the clip's position, not
+/// the clip's own signal and not a future clip. It is therefore only
+/// available during montage mixing; on the master bus (which has no
+/// sidechain) the effect is bypassed with a one-shot warning.
+fn apply_ducking(
+    buf: &mut [f32],
+    frames: usize,
+    channels: usize,
+    effect: &crate::ticket::MontageAudioEffect,
+    rate: f64,
+    sidechain: Option<&[f32]>,
+) {
+    let Some(sidechain) = sidechain else {
+        warn_unsupported_once(
+            &effect.type_id,
+            "needs a clip-position accumulator sidechain (not available on the master bus)",
+        );
+        return;
+    };
+    let rate = rate.max(1.0);
+    let threshold_db = effect_param(
+        effect,
+        quercus_node::block::AUDIO_DUCKING_THRESHOLD_INPUT,
+        -30.0,
+    )
+    .clamp(-100.0, 0.0);
+    let amount_db = effect_param(
+        effect,
+        quercus_node::block::AUDIO_DUCKING_AMOUNT_INPUT,
+        -12.0,
+    )
+    .clamp(-60.0, 0.0);
+    let attack_ms = effect_param(
+        effect,
+        quercus_node::block::AUDIO_DUCKING_ATTACK_INPUT,
+        50.0,
+    )
+    .clamp(0.1, 5_000.0);
+    let release_ms = effect_param(
+        effect,
+        quercus_node::block::AUDIO_DUCKING_RELEASE_INPUT,
+        300.0,
+    )
+    .clamp(1.0, 10_000.0);
+    let threshold = 10f64.powf(threshold_db / 20.0) as f32;
+    let amount = 10f64.powf(amount_db / 20.0) as f32;
+    let attack = (-1.0f64 / (rate * attack_ms / 1_000.0)).exp() as f32;
+    let release = (-1.0f64 / (rate * release_ms / 1_000.0)).exp() as f32;
+    let mut envelope = 1.0f32;
+    for frame in 0..frames {
+        let mut detector = 0.0f32;
+        for channel in 0..channels {
+            if let Some(value) = sidechain.get(frame * channels + channel) {
+                detector = detector.max(value.abs());
+            }
+        }
+        let target = if detector >= threshold { amount } else { 1.0 };
+        let coeff = if target < envelope { attack } else { release };
+        envelope = coeff * envelope + (1.0 - coeff) * target;
+        for channel in 0..channels {
+            buf[frame * channels + channel] *= envelope;
+        }
+    }
+}
+
 fn apply_audio_effect(
     buf: &mut [f32],
     frames: usize,
     channels: usize,
     effect: &crate::ticket::MontageAudioEffect,
     rate: f64,
+    sidechain: Option<&[f32]>,
 ) {
     if !effect.enabled {
         return;
@@ -2802,6 +2992,18 @@ fn apply_audio_effect(
         apply_compressor(buf, frames, channels, effect, rate);
         return;
     }
+    if effect.type_id == quercus_node::block::AUDIO_EFFECT_LIMITER_TYPE_ID {
+        apply_limiter(buf, frames, channels, effect, rate);
+        return;
+    }
+    if effect.type_id == quercus_node::block::AUDIO_EFFECT_GATE_TYPE_ID {
+        apply_gate(buf, frames, channels, effect, rate);
+        return;
+    }
+    if effect.type_id == quercus_node::block::AUDIO_EFFECT_DUCKING_TYPE_ID {
+        apply_ducking(buf, frames, channels, effect, rate, sidechain);
+        return;
+    }
     let (param_input, default) = match effect.type_id.as_str() {
         quercus_node::block::AUDIO_EFFECT_VOLUME_TYPE_ID => {
             (quercus_node::block::AUDIO_VOLUME_INPUT, 1.0)
@@ -2810,10 +3012,7 @@ fn apply_audio_effect(
             (quercus_node::block::AUDIO_PAN_INPUT, 0.0)
         }
         other => {
-            warn_unsupported_once(
-                other,
-                "not a built-in audio effect (only Volume and Pan are wired)",
-            );
+            warn_unsupported_once(other, "not a built-in float-parameter audio effect");
             return;
         }
     };
@@ -2907,8 +3106,13 @@ fn mix_audio_montage(
         };
         // Gain, constant-power pan, clip fades and the audio effect chain
         // all run through the shared per-clip processor. The first decoded
-        // frame sits at the rounded absolute sequence time.
+        // frame sits at the rounded absolute sequence time. Ducking reads
+        // the accumulator over this clip's window: it holds exactly the
+        // clips already mixed (montage order), never future clips.
         let first_time = params.range.in_().to_f64() + start_frame as f64 / rate as f64;
+        let start_sample = start_frame * channels as usize;
+        let sample_count = written * channels as usize;
+        let sidechain = &acc[start_sample..start_sample + sample_count];
         process_clip_audio(
             &mut buf,
             written,
@@ -2916,12 +3120,21 @@ fn mix_audio_montage(
             clip,
             first_time,
             rate,
+            Some(sidechain),
         );
         // Mix into the accumulator.
-        for i in 0..written * channels as usize {
-            acc[start_frame * channels as usize + i] += buf[i];
+        for i in 0..sample_count {
+            acc[start_sample + i] += buf[i];
         }
     }
+    // Master bus: the sequence-level chain runs on the fully mixed
+    // accumulator, then the playback/delivery full-scale clamp.
+    apply_bus_effects(
+        acc,
+        channels as usize,
+        &params.bus_effects,
+        rate as f64,
+    );
     // Clamp to [-1, 1]: overlapping clips sum linearly and can exceed
     // full scale, and the playback sink (cpal) forwards samples without
     // any clamping of its own.
@@ -2929,6 +3142,25 @@ fn mix_audio_montage(
         *sample = sample.clamp(-1.0, 1.0);
     }
     Ok(())
+}
+
+/// Apply a master-bus chain to the mixed interleaved accumulator.
+///
+/// The chain supports the built-in `Volume`, `Pan`, `EQ`, `Compressor`,
+/// `Limiter` and `Gate` kernels. `Ducking` is a clip-position sidechain
+/// effect and is bypassed on the bus (there is no detector signal after
+/// the final mix).
+fn apply_bus_effects(
+    acc: &mut [f32],
+    channels: usize,
+    effects: &[crate::ticket::MontageAudioEffect],
+    rate: f64,
+) {
+    let channels = channels.max(1);
+    let frames = acc.len() / channels;
+    for effect in effects {
+        apply_audio_effect(acc, frames, channels, effect, rate, None);
+    }
 }
 
 /// Render the audio montage over `params.range` directly into `dst` as
@@ -3960,6 +4192,7 @@ mod tests {
             sample_rate: 48000,
             channel_layout: 0x3,
             montage: Vec::new(),
+            bus_effects: Vec::new(),
         }
     }
 
@@ -5534,7 +5767,7 @@ mod tests {
         rate: i32,
     ) {
         let frames = buf.len() / channels;
-        process_clip_audio(buf, frames, channels, clip, first_time, rate);
+        process_clip_audio(buf, frames, channels, clip, first_time, rate, None);
     }
 
     /// Gain 1.0 at pan centre is unity on both stereo channels; the
@@ -5770,6 +6003,150 @@ mod tests {
         for sample in &buf {
             assert!((*sample - 1.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn limiter_keeps_a_full_scale_sine_under_its_ceiling() {
+        let effect = audio_param_effect(
+            quercus_node::block::AUDIO_EFFECT_LIMITER_TYPE_ID,
+            &[
+                (quercus_node::block::AUDIO_LIMITER_CEILING_INPUT, -1.0),
+                (quercus_node::block::AUDIO_LIMITER_RELEASE_INPUT, 50.0),
+            ],
+        );
+        let frames = 24_000;
+        let mut buf: Vec<f32> = (0..frames)
+            .map(|frame| {
+                (std::f64::consts::TAU * 1_000.0 * frame as f64 / 48_000.0).sin() as f32
+            })
+            .collect();
+        assert!((buf.iter().fold(0.0f32, |peak, x| peak.max(x.abs())) - 1.0).abs() < 1e-3);
+        apply_audio_effect(&mut buf, frames, 1, &effect, 48_000.0, None);
+        let ceiling = 10f64.powf(-1.0 / 20.0) as f32;
+        let peak = buf.iter().fold(0.0f32, |peak, x| peak.max(x.abs()));
+        assert!(
+            peak <= ceiling + 1e-6,
+            "limiter output {peak} must not exceed the ceiling {ceiling}"
+        );
+        assert!(peak > 0.5, "the limiter must not mute the signal, peak {peak}");
+    }
+
+    #[test]
+    fn gate_suppresses_a_low_signal_and_passes_a_loud_one() {
+        let gate = || {
+            audio_param_effect(
+                quercus_node::block::AUDIO_EFFECT_GATE_TYPE_ID,
+                &[
+                    (quercus_node::block::AUDIO_GATE_THRESHOLD_INPUT, -40.0),
+                    (quercus_node::block::AUDIO_GATE_ATTACK_INPUT, 1.0),
+                    (quercus_node::block::AUDIO_GATE_RELEASE_INPUT, 10.0),
+                    (quercus_node::block::AUDIO_GATE_HOLD_INPUT, 5.0),
+                ],
+            )
+        };
+        let frames = 48_000;
+        let tone = |amplitude: f32| -> Vec<f32> {
+            (0..frames)
+                .map(|frame| {
+                    let t = frame as f64 / 48_000.0;
+                    (f64::from(amplitude) * (std::f64::consts::TAU * 440.0 * t).sin()) as f32
+                })
+                .collect()
+        };
+        let rms = |samples: &[f32]| -> f32 {
+            let tail = &samples[samples.len() / 2..];
+            (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt()
+        };
+
+        let mut quiet = tone(0.001); // -60 dBFS, below the -40 dBFS gate
+        apply_audio_effect(&mut quiet, frames, 1, &gate(), 48_000.0, None);
+        assert!(
+            rms(&quiet) < 1e-4,
+            "below-threshold signal is attenuated, rms {}",
+            rms(&quiet)
+        );
+
+        let mut loud = tone(0.5); // -6 dBFS, above the gate
+        apply_audio_effect(&mut loud, frames, 1, &gate(), 48_000.0, None);
+        assert!(
+            rms(&loud) > 0.2,
+            "above-threshold signal passes, rms {}",
+            rms(&loud)
+        );
+    }
+
+    #[test]
+    fn ducking_reduces_music_after_dialogue_in_the_accumulator() {
+        // The synthetic accumulator: dialogue is present for the first
+        // half, then silence. The music clip runs across the whole window
+        // and is the buffer the ducker processes.
+        let frames = 24_000;
+        let mut music = vec![0.5f32; frames];
+        let mut sidechain = vec![0.0f32; frames];
+        for sample in &mut sidechain[..frames / 2] {
+            *sample = 0.5;
+        }
+        let clip = audio_test_clip(
+            1.0,
+            0.0,
+            Rational::new(0, 1),
+            Rational::new(0, 1),
+            vec![audio_param_effect(
+                quercus_node::block::AUDIO_EFFECT_DUCKING_TYPE_ID,
+                &[
+                    (quercus_node::block::AUDIO_DUCKING_THRESHOLD_INPUT, -30.0),
+                    (quercus_node::block::AUDIO_DUCKING_AMOUNT_INPUT, -12.0),
+                    (quercus_node::block::AUDIO_DUCKING_ATTACK_INPUT, 1.0),
+                    (quercus_node::block::AUDIO_DUCKING_RELEASE_INPUT, 20.0),
+                ],
+            )],
+        );
+        process_clip_audio(
+            &mut music,
+            frames,
+            1,
+            &clip,
+            0.0,
+            48_000,
+            Some(&sidechain),
+        );
+        let during = music[frames / 4];
+        let after = music[frames - 1];
+        assert!(
+            during < 0.2,
+            "dialogue must duck the music by ~12 dB, got {during}"
+        );
+        assert!(
+            after > 0.45,
+            "music recovers after the dialogue stops, got {after}"
+        );
+    }
+
+    #[test]
+    fn bus_limiter_applies_to_the_mixed_accumulator() {
+        let frames = 4_800;
+        // Two overlapping clips mixed linearly: 1.6 would clip at the
+        // final full-scale clamp, but the bus limiter must catch it first.
+        let mut acc = vec![1.6f32; frames];
+        let bus = [audio_param_effect(
+            quercus_node::block::AUDIO_EFFECT_LIMITER_TYPE_ID,
+            &[
+                (quercus_node::block::AUDIO_LIMITER_CEILING_INPUT, -1.0),
+                (quercus_node::block::AUDIO_LIMITER_RELEASE_INPUT, 50.0),
+            ],
+        )];
+        apply_bus_effects(&mut acc, 1, &bus, 48_000.0);
+        let ceiling = 10f64.powf(-1.0 / 20.0) as f32;
+        let peak = acc.iter().fold(0.0f32, |peak, x| peak.max(x.abs()));
+        assert!(
+            peak <= ceiling + 1e-6,
+            "bus limiter must bound the mixed accumulator, peak {peak}"
+        );
+        // The final full-scale clamp still runs after the bus.
+        for sample in &mut acc {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        assert_eq!(acc.iter().fold(0.0f32, |peak, x| peak.max(x.abs())), peak);
     }
 
     #[test]

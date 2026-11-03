@@ -58,6 +58,7 @@ fn main() {
 			sample_rate,
 			channel_layout,
 			montage: montage.clone(),
+			bus_effects: Vec::new(),
 		};
 		match render_audio_samples(&params) {
 			Ok(TicketPayload::Audio(samples)) => {

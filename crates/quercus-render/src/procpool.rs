@@ -2508,6 +2508,11 @@ fn build_audio_ticket_spec(ticket: i64, slot: u32, params: &AudioTicketParams) -
 		.iter()
 		.map(crate::ipc::wire_montage_clip_from)
 		.collect();
+	let bus_effects = params
+		.bus_effects
+		.iter()
+		.map(crate::ipc::wire_audio_effect_from)
+		.collect();
 	AudioTicketSpec {
 		ticket,
 		slot: slot as i32,
@@ -2519,6 +2524,7 @@ fn build_audio_ticket_spec(ticket: i64, slot: u32, params: &AudioTicketParams) -
 		channel_layout: params.channel_layout,
 		channels: params.channel_layout.count_ones().max(1) as i32,
 		montage,
+		bus_effects,
 	}
 }
 
@@ -3525,6 +3531,7 @@ mod tests {
 						sample_rate: 48000,
 						channel_layout: 0x3,
 						montage: Vec::new(),
+						bus_effects: Vec::new(),
 					})),
 					done: Some(Box::new(move |result| {
 						sink.lock().unwrap_or_else(|e| e.into_inner()).push(result)
@@ -3869,6 +3876,7 @@ mod tests {
 						sample_rate: 48000,
 						channel_layout: 0x3,
 						montage: Vec::new(),
+						bus_effects: Vec::new(),
 					})),
 					done: None,
 				},
@@ -4019,6 +4027,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_layout: 0x3,
 			montage: Vec::new(),
+			bus_effects: Vec::new(),
 		});
 		assert!(!dispatcher.post(test_job(6, 0, Some(big), &results)));
 		// An invalid (zero-length) audio range is refused too.
@@ -4031,6 +4040,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_layout: 0x3,
 			montage: Vec::new(),
+			bus_effects: Vec::new(),
 		});
 		assert!(!dispatcher.post(test_job(6, 0, Some(zero), &results)));
 
@@ -4350,6 +4360,7 @@ mod tests {
 				effects: Vec::new(),
 				audio_effects: Vec::new(),
 			}],
+			bus_effects: Vec::new(),
 		};
 		let spec = build_audio_ticket_spec(5, 2, &params);
 		assert_eq!(spec.ticket, 5);
@@ -4436,6 +4447,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_layout: 0x3,
 			montage: Vec::new(),
+			bus_effects: Vec::new(),
 		});
 		let audio_results: Arc<Mutex<Vec<TicketResult>>> = Arc::new(Mutex::new(Vec::new()));
 		assert!(dispatcher.post(test_job(2, 0, Some(audio), &audio_results)));
@@ -4688,6 +4700,7 @@ mod tests {
 						sample_rate: 48000,
 						channel_layout: 0x3,
 						montage: Vec::new(),
+						bus_effects: Vec::new(),
 					})),
 					done: None,
 				},

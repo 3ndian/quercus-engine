@@ -65,9 +65,15 @@ pub struct MontageEffect {
 ///
 /// The chain is stored on the clip as
 /// [`quercus_node::block::ClipAudioEffect`] so preview, export and the
-/// render worker read the same ordered list. Only the built-in Volume and
-/// Pan kernels are evaluated today; an unknown `type_id` is bypassed with
-/// a one-shot warning instead of failing the render.
+/// render worker read the same ordered list. The built-in `Volume`, `Pan`,
+/// `EQ`, `Compressor`, `Limiter`, `Gate` and `Ducking` kernels are
+/// evaluated; an unknown `type_id` is bypassed with a one-shot warning
+/// instead of failing the render.
+///
+/// `Ducking` is a sidechain effect against the already-mixed sequence
+/// accumulator at the clip's position (montage order; future clips are
+/// never read). The same type on a master-bus chain has no detector and
+/// is bypassed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MontageAudioEffect {
 	/// Built-in node type id (e.g.
@@ -238,8 +244,13 @@ pub struct AudioTicketParams {
 	/// Output channel layout mask.
 	pub channel_layout: u64,
 	/// Clips to mix (ordered arbitrarily; gains applied, silence
-	/// elsewhere).
+	/// elsewhere). Clips are mixed in list order; a clip's ducking
+	/// effects see this accumulator as their sidechain.
 	pub montage: Vec<MontageClip>,
+	/// Sequence master-bus effect chain, applied to the mixed accumulator
+	/// after every clip and before the final full-scale clamp. Additive
+	/// field: older callers leave it empty (no bus processing).
+	pub bus_effects: Vec<MontageAudioEffect>,
 }
 
 /// Ticket parameters (Rust view of `quercusrender_video_ticket_params`).
@@ -1026,6 +1037,7 @@ mod tests {
 				sample_rate: 48000,
 				channel_layout: 0x3,
 				montage: Vec::new(),
+				bus_effects: Vec::new(),
 			},
 			Box::new(move |r: TicketResult| {
 				let _ = tx.send(r.is_err());

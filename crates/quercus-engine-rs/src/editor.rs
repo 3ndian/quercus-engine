@@ -1081,4 +1081,71 @@ mod clip_audio_post_tests {
 		assert!(!session.set_clip_audio_effect_enabled(clip, 99, true));
 		assert!(!session.remove_clip_audio_effect(clip, 99));
 	}
+
+	/// The master-bus chain setters and the loudness measurement cross
+	/// the C ABI; an empty sequence measures as silence.
+	#[test]
+	fn bus_effects_and_loudness_cross_the_abi() {
+		use crate::types::TimeRange;
+		let _guard = crate::node::UNDO_SERIAL
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let session = EditorSession::new().expect("session");
+		let _sequence = session.create_sequence("Master Bus").expect("sequence");
+
+		let range = TimeRange::new(Rational::new(0, 1), Rational::new(1, 1));
+		let measured = session.measure_loudness(range).expect("measurement");
+		assert_eq!(measured.integrated_lufs, f64::NEG_INFINITY);
+		assert_eq!(measured.peak_dbfs, f64::NEG_INFINITY);
+
+		assert!(session.audio_bus_effects().is_empty());
+		assert!(session.add_audio_bus_effect(
+			"org.olivevideoeditor.Olive.limiter",
+			0
+		));
+		assert!(session.set_audio_bus_effect_param(0, "ceiling_db", -1.0));
+		assert!(session.set_audio_bus_effect_param(0, "release_ms", 50.0));
+		let effects = session.audio_bus_effects();
+		assert_eq!(effects.len(), 1);
+		assert_eq!(effects[0].type_id, "org.olivevideoeditor.Olive.limiter");
+		assert!(effects[0].enabled);
+		assert!(effects[0]
+			.params
+			.iter()
+			.any(|(input, value)| input == "ceiling_db" && (*value + 1.0).abs() < 1e-9));
+
+		// The chain is stored in the project settings map and survives a
+		// save/open cycle.
+		let path = std::env::temp_dir()
+			.join(format!(
+				"quercus_sdk_audio_bus_roundtrip_{}.ove",
+				std::process::id()
+			))
+			.to_string_lossy()
+			.into_owned();
+		session.save(&path).expect("save");
+		let opened = EditorSession::open(&path).expect("open");
+		let persisted = opened.audio_bus_effects();
+		assert_eq!(persisted.len(), 1);
+		assert_eq!(
+			persisted[0].type_id,
+			"org.olivevideoeditor.Olive.limiter"
+		);
+		assert!(persisted[0]
+			.params
+			.iter()
+			.any(|(input, value)| input == "ceiling_db" && (*value + 1.0).abs() < 1e-9));
+		let _ = std::fs::remove_file(&path);
+
+		assert!(session.set_audio_bus_effect_enabled(0, false));
+		assert!(!session.audio_bus_effects()[0].enabled);
+		assert!(session.remove_audio_bus_effect(0));
+		assert!(session.audio_bus_effects().is_empty());
+
+		// Invalid operations come back as false, not a panic.
+		assert!(!session.add_audio_bus_effect("", 0));
+		assert!(!session.remove_audio_bus_effect(9));
+		assert!(!session.set_audio_bus_effect_param(9, "ceiling_db", -1.0));
+		assert!(!session.set_audio_bus_effect_param(0, "ceiling_db", f64::NAN));
+	}
 }

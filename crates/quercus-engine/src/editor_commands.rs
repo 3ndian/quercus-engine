@@ -28,6 +28,8 @@ mod moving;
 pub use moving::*;
 mod multicam;
 pub use multicam::*;
+mod audio_bus;
+pub use audio_bus::*;
 mod multicam_wizard;
 pub use multicam_wizard::*;
 mod edit_menu;

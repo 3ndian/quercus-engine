@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-/* 57 POD structs, 14 enums, 731 functions. */
+/* 58 POD structs, 14 enums, 739 functions. */
 
 /* 3x3 color matrix returned by the colormath helpers. */
 typedef struct QuercusMat3 { float v[3][3]; } QuercusMat3;
@@ -250,6 +250,7 @@ typedef struct QuercusTrackPlacement QuercusTrackPlacement;
 typedef struct QuercusEditParams QuercusEditParams;
 typedef struct QuercusEditResult QuercusEditResult;
 typedef struct QuercusLevelStats QuercusLevelStats;
+typedef struct QuercusLoudness QuercusLoudness;
 typedef struct QuercusMediaIoError QuercusMediaIoError;
 typedef struct QuercusMediaIoVTable QuercusMediaIoVTable;
 typedef struct QuercusOfxCurvePoint QuercusOfxCurvePoint;
@@ -547,6 +548,10 @@ struct QuercusLevelStats {
     double max_peak_linear;
     double integrated_lufs;
     int32_t silence;
+};
+struct QuercusLoudness {
+    double integrated_lufs;
+    double peak_dbfs;
 };
 struct QuercusMediaIoError {
     int32_t code;
@@ -1014,9 +1019,13 @@ VideoParams quercus_core_videoparams_default(void);
 int32_t quercus_core_videoparams_effective_height(const VideoParams* params);
 int32_t quercus_core_videoparams_effective_width(const VideoParams* params);
 bool quercus_core_videoparams_is_valid(const VideoParams* params);
+bool quercus_editor_add_audio_bus_effect(const void* session, const uint8_t* type_id, size_t type_id_len, int32_t index);
 bool quercus_editor_add_clip_audio_effect(const void* session, uint64_t clip, const uint8_t* type_id, size_t type_id_len, int32_t index);
 void quercus_editor_add_ref(const void* session);
 void* quercus_editor_adopt_storage_project_handle(StorageProjectHandle project);
+int32_t quercus_editor_audio_bus_effect_count(const void* session);
+bool quercus_editor_audio_bus_effect_info(const void* session, int32_t index, QuercusClipAudioEffectInfo* out);
+bool quercus_editor_audio_bus_effect_param(const void* session, int32_t index, const uint8_t* input, size_t input_len, double* out);
 bool quercus_editor_bind_project_to_library(void* session);
 bool quercus_editor_clip_audio_effect_info(const void* session, uint64_t clip, int32_t index, QuercusClipAudioEffectInfo* out);
 bool quercus_editor_clip_audio_effect_param(const void* session, uint64_t clip, int32_t index, const uint8_t* input, size_t input_len, double* out);
@@ -1050,6 +1059,7 @@ int32_t quercus_editor_import_subtitles_styled(const void* session, const uint8_
 bool quercus_editor_marker_at(const void* session, int32_t index, EditorMarkerRaw* out);
 int32_t quercus_editor_marker_count(const void* session);
 int32_t quercus_editor_marker_name_at(const void* session, int32_t index, uint8_t* buf, size_t buf_len);
+bool quercus_editor_measure_loudness(const void* session, const TimeRange* range, QuercusLoudness* out);
 uint64_t quercus_editor_multicam_clip_at(const void* session, uint64_t sequence, Rational time);
 uint64_t quercus_editor_multicam_connected_sequence(const void* session, uint64_t clip);
 int32_t quercus_editor_multicam_current_source(const void* session, uint64_t multicam);
@@ -1088,8 +1098,11 @@ uint64_t quercus_editor_proxy_generate(const void* session, uint64_t footage, co
 int32_t quercus_editor_proxy_path(const void* session, uint64_t footage, uint8_t* buf, size_t buf_len);
 bool quercus_editor_proxy_status(const void* session, uint64_t footage, RawProxyStatus* out);
 void quercus_editor_release(const void* session);
+bool quercus_editor_remove_audio_bus_effect(const void* session, int32_t index);
 bool quercus_editor_remove_clip_audio_effect(const void* session, uint64_t clip, int32_t index);
 int32_t quercus_editor_save(const void* session, const uint8_t* path, size_t path_len, uint32_t options);
+bool quercus_editor_set_audio_bus_effect_enabled(const void* session, int32_t index, bool enabled);
+bool quercus_editor_set_audio_bus_effect_param(const void* session, int32_t index, const uint8_t* input_id, size_t input_id_len, double value);
 bool quercus_editor_set_clip_audio_effect_enabled(const void* session, uint64_t clip, int32_t index, bool enabled);
 bool quercus_editor_set_clip_audio_effect_param(const void* session, uint64_t clip, int32_t index, const uint8_t* input_id, size_t input_id_len, double value);
 bool quercus_editor_set_clip_fade(const void* session, uint64_t clip, int64_t fade_in_num, int64_t fade_in_den, int64_t fade_out_num, int64_t fade_out_den);

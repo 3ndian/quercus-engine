@@ -686,12 +686,17 @@ impl RenderTask {
 		let (sample_rate, channel_layout) =
 			crate::nodeops::sequence_audio_params(project, *viewer_id);
 		let montage = Self::audio_montage(project, *viewer_id, range.in_());
+		let bus_effects = {
+			let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+			quercus_render::audio::load_bus_effects(&guard.settings, viewer_id.identity())
+		};
 		Ok(AudioTicketParams {
 			viewer: viewer_id.identity(),
 			range,
 			sample_rate,
 			channel_layout,
 			montage,
+			bus_effects,
 		})
 	}
 
