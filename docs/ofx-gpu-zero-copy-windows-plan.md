@@ -5,6 +5,8 @@
 目标：Windows 上 OFX GL 插件输入/输出同一块 GPU 显存，无
 `glReadPixels`、无 CPU `Frame`、无 upload/download。
 不包含：Windows 上 Oak 预览器的最终 present 零拷贝（另列）。
+明确不做：DX12/D3D12 纹理导出、D3D11↔GL interop（`WGL_NV_DX_interop2`）。
+Windows 只接 Vulkan + WGL 这一条路；不可用就回退现有路径。
 
 ## 1. Linux 第一版的可复用结论
 
@@ -40,8 +42,8 @@ wgpu/Vulkan 设备
 ### 2.1 选型理由
 
 - 与 Linux 的 `OPAQUE_FD` + `GL_EXT_memory_object_fd` 一一对应；
-- 不需要把 wgpu 的 DX12 纹理转成 D3D11；
-- 不需要 `WGL_NV_DX_interop2` 的 lock/unlock 生命周期；
+- 不引入 DX12/D3D12 纹理，也不引入 `WGL_NV_DX_interop2` 的
+  lock/unlock 生命周期；
 - 不经过 DMA-BUF/EGL，Windows 原生路径更短；
 - NVIDIA/AMD 的 Windows 驱动通常支持
   `GL_EXT_memory_object_win32`；Intel 需实测。
@@ -69,8 +71,8 @@ wgpu/Vulkan 设备
 - `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT`
 - `GL_HANDLE_TYPE_OPAQUE_WIN32_EXT`（`0x9587`）
 
-如果目标驱动只支持 `D3D11_TEXTURE` / `WGL_NV_DX_interop2`，转
-第二方案（见第 6 节），不在第一版混用。
+如果目标驱动不支持这个组合，直接回退现有 GL 回读/CPU 路径；
+**不实现 D3D11/D3D12 interop 作为替代方案**。
 
 ## 3. 分阶段实施
 
@@ -92,7 +94,7 @@ wgpu/Vulkan 设备
 9. 打印 GL_RENDERER、Vulkan 设备名、扩展、handle 类型。
 
 验收：NVIDIA 与 AMD 至少各一台真实 Windows 机器颜色正确。
-失败则先确定 `WGL_NV_DX_interop2` 方案，不接生产渲染器。
+失败则停止，记录该驱动不支持；不接生产渲染器，也不转 D3D interop。
 
 ### 阶段 1：`quercus-core` Windows 可导出纹理
 
@@ -232,33 +234,18 @@ Linux/FreeBSD 注册），因此引擎会自己创建 Vulkan 设备，正好符�
 - `cargo check -p oak-app` on Windows；
 - OFX 插件预览/导出路径在 Windows 真实 GPU 上无 `glReadPixels`；
 - 如果以后 Oak 在 Windows 注册 DX12 context，`supports_gl_zerocopy`
-  必须为 false（不能把 DX12 纹理当 Vulkan 导出），并自动回退。
+  必须为 false，并自动回退；不实现 DX12 导出。
 - Oak 预览器目前仍是 RGBA16F 上传；Windows OFX 边界零拷贝不依赖它。
 
-### 阶段 5：可选第二方案（D3D12/D3D11 + WGL_NV_DX_interop2）
+## 4. 明确不做的范围
 
-只有以下情况才做：
+- 不做 DX12 / D3D12 纹理导出；
+- 不做 `WGL_NV_DX_interop2` / D3D11 `OpenSharedResource1`；
+- 不做 D3D11VA 解码纹理到 GL 的直接零拷贝；这类输入回退现有
+  GL 回读/CPU 路径；
+- 不为了 Windows 改变 Linux 的默认渲染路径或 Vulkan 纹理分配策略。
 
-- Oak/引擎在 Windows 必须用 DX12；
-- 或目标驱动不支持 `GL_EXT_memory_object_win32`；
-- 或需要直接消费 D3D11VA 解码纹理（当前
-  `import_d3d11_shared_texture` 的 Vulkan 纹理不能直接导出为
-  OPAQUE_WIN32）。
-
-方案：
-
-1. 自建 `D3D12_HEAP_FLAG_SHARED`、`R32G32B32A32_FLOAT`、
-   `ALLOW_RENDER_TARGET` 资源，`CreateSharedHandle`；
-2. 用 wgpu-hal DX12 `texture_from_raw` 包回；
-3. D3D11 `OpenSharedResource1`；
-4. `wglDXOpenDeviceNV` + `wglDXRegisterObjectNV` +
-   `wglDXLockObjectsNV`/`UnlockObjectsNV`；
-5. 输出/输入都走 D3D11↔GL interop；
-6. 单独测试锁生命周期、设备丢失、跨适配器。
-
-这一阶段工作量和风险都显著高于第一版，不混入首版。
-
-## 4. 代码改动清单
+## 5. 代码改动清单
 
 | 文件 | 改动 |
 |---|---|
@@ -275,7 +262,7 @@ Linux/FreeBSD 注册），因此引擎会自己创建 Vulkan 设备，正好符�
 | `crates/quercus-ofx-plugin/tests/gl_render_test.rs` | Windows 端到端零拷贝测试 |
 | `docs/engine-capabilities.md` | 平台矩阵更新 |
 
-## 5. 验收标准
+## 6. 验收标准
 
 必须同时满足：
 
@@ -289,27 +276,26 @@ Linux/FreeBSD 注册），因此引擎会自己创建 Vulkan 设备，正好符�
 8. Oak Windows `cargo check` 通过，OFX 预览无回读；
 9. 文档写明 Vulkan-only 与多 GPU 限制。
 
-## 6. 风险与回退
+## 7. 风险与回退
 
 | 风险 | 处理 |
 |---|---|
-| 驱动不支持 `GL_EXT_memory_object_win32` | 探测后禁用；转 `WGL_NV_DX_interop2` 第二阶段 |
+| 驱动不支持 `GL_EXT_memory_object_win32` | 探测后禁用；回退现有路径，不做 D3D interop |
 | GL 与 Vulkan 不是同一 GPU | `GL_RENDERER` 与 adapter name 比对，不匹配禁用 |
 | 多 GPU 笔记本默认 GL 走 iGPU | 第二阶段用 LUID/PCI 精确选择；第一版直接回退 |
 | 句柄所有权/泄漏 | 探针验证；`DuplicateHandle` + Drop `CloseHandle`，测试计数 |
 | Vulkan 设备未启用 Win32 扩展 | 创建时请求 feature；不支持则 `supports_gl_zerocopy=false` |
-| Oak 将来用 DX12 context | 严格 Vulkan 检查，DX12 自动回退；真正 DX12 零拷贝走第二阶段 |
-| D3D11VA 解码纹理不可导出 | 该输入回退旧 GL 回读；后续用 DX interop |
+| Oak 将来用 DX12 context | 严格 Vulkan 检查，DX12 自动回退；不实现 DX12 零拷贝 |
+| D3D11VA 解码纹理不可导出 | 该输入回退旧 GL 回读；不做 DX interop |
 | 无 GPU 的 Windows CI | 只编译/单测；真实 GPU 测试用自托管 runner |
 
-## 7. 建议实施顺序
+## 8. 建议实施顺序
 
 1. Windows 探针（真实 GPU）；
 2. `quercus-core` Windows 导出；
 3. WGL 桥 + 探针复用；
 4. render/clip/node 接线；
 5. 测试插件 Windows 构建 + 端到端测试；
-6. Oak Windows 验证；
-7. 再评估 `WGL_NV_DX_interop2`。
+6. Oak Windows 验证。
 
 未完成上述 1–6 前，不把 Windows 能力标记为“完成”，不发布。
