@@ -272,8 +272,11 @@ pub fn remove_node(p: &ProjectRef, node: NodeId) -> Result<(), String> {
 /// decode sessions hold this guard to prevent cross-test interference.
 #[cfg(test)]
 pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-	static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-	LOCK.lock().unwrap_or_else(|e| e.into_inner())
+	// Share the undo-stack lock with the node tests: both modules mutate
+	// the same process-global stack, so separate mutexes still race.
+	crate::node::UNDO_SERIAL
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
 }
 
 // ---------------------------------------------------------------------------

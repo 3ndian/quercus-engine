@@ -121,6 +121,14 @@ pub fn gl_available() -> bool {
 	imp::gl_available()
 }
 
+/// Linux: prefer the EGL device whose renderer matches the engine's
+/// Vulkan adapter (multi-GPU machines). Must be called before the GL
+/// context is first created; later calls are ignored.
+#[cfg(target_os = "linux")]
+pub fn set_preferred_renderer(name: &str) {
+	imp::set_preferred_renderer(name);
+}
+
 /// 取得进程级 GL 上下文并把本线程置为 current（全局串行）。
 /// 返回的 guard 在 drop 时清 current 并放锁。失败（无 GL / 上下文
 /// 创建失败）→ 调用方回退 CPU。
@@ -1231,8 +1239,25 @@ mod imp {
 		}
 	}
 
+	/// Renderer name preference (set from the engine's Vulkan adapter).
+	static PREFERRED_RENDERER: Mutex<Option<String>> = Mutex::new(None);
+
+	pub fn set_preferred_renderer(name: &str) {
+		let mut slot = PREFERRED_RENDERER.lock().unwrap_or_else(|e| e.into_inner());
+		if slot.is_none() && !name.is_empty() {
+			*slot = Some(name.to_string());
+		}
+	}
+
 	fn pick_display(egl: &EglFns) -> Result<EGLDisplay, String> {
+		let preferred = PREFERRED_RENDERER
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.clone()
+			.unwrap_or_default()
+			.to_ascii_lowercase();
 		let mut first: Option<EGLDisplay> = None;
+		let mut first_hardware: Option<EGLDisplay> = None;
 		if let (Some(get_platform), Some(query_devices), Some(query_device_string)) = (
 			egl.get_platform_display,
 			egl.query_devices,
@@ -1246,8 +1271,7 @@ mod imp {
 					if i >= count as usize {
 						break;
 					}
-					let dpy =
-						unsafe { get_platform(EGL_PLATFORM_DEVICE_EXT, dev, std::ptr::null()) };
+					let dpy = unsafe { get_platform(EGL_PLATFORM_DEVICE_EXT, dev, std::ptr::null()) };
 					if dpy.is_null() {
 						continue;
 					}
@@ -1258,21 +1282,29 @@ mod imp {
 					}
 					let vendor = cstr(unsafe { (egl.query_string)(dpy, EGL_VENDOR) });
 					let renderer = cstr(unsafe { query_device_string(dev, EGL_RENDERER_EXT) });
-					let node =
-						cstr(unsafe { query_device_string(dev, EGL_DRM_RENDER_NODE_FILE_EXT) });
+					let node = cstr(unsafe { query_device_string(dev, EGL_DRM_RENDER_NODE_FILE_EXT) });
 					if std::env::var_os("QUERCUS_OFX_GL_TRACE").is_some() {
 						eprintln!("[ofx-gl] egl device {i}: vendor={vendor} renderer={renderer} node={node}");
 					}
-					if !renderer.to_ascii_lowercase().contains("llvmpipe")
-						&& !vendor.to_ascii_lowercase().contains("mesa")
-					{
-						return Ok(dpy);
+					let software = renderer.to_ascii_lowercase().contains("llvmpipe")
+						|| vendor.to_ascii_lowercase().contains("mesa");
+					if !preferred.is_empty() {
+						let r = renderer.to_ascii_lowercase();
+						if r.contains(&preferred) || preferred.contains(&r) {
+							return Ok(dpy);
+						}
+					}
+					if !software && first_hardware.is_none() {
+						first_hardware = Some(dpy);
 					}
 					if first.is_none() {
 						first = Some(dpy);
 					}
 				}
 			}
+		}
+		if let Some(dpy) = first_hardware {
+			return Ok(dpy);
 		}
 		if let Some(dpy) = first {
 			return Ok(dpy);
@@ -1284,9 +1316,10 @@ mod imp {
 		let mut major = 0i32;
 		let mut minor = 0i32;
 		if unsafe { (egl.initialize)(dpy, &mut major, &mut minor) } != EGL_TRUE {
-			return Err(format!("eglInitialize(default) failed: 0x{:x}", unsafe {
-				(egl.get_error)()
-			}));
+			return Err(format!(
+				"eglInitialize(default) failed: 0x{:x}",
+				unsafe { (egl.get_error)() }
+			));
 		}
 		Ok(dpy)
 	}

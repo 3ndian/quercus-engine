@@ -597,8 +597,10 @@ fn sequence_edge_cases() {
 		.unwrap()
 		.downcast_ref::<SequenceBehavior>()
 		.unwrap();
-	// C++ `copy()` clones without values/params; the duplicate is empty.
-	assert_eq!(d.video_stream_count(), 0);
+	// The deep copy keeps the parameter streams (the serializer depends
+	// on it to reload a sequence with its video/audio params).
+	assert_eq!(d.video_stream_count(), 1);
+	assert_eq!(d.audio_stream_count(), 1);
 	let def = SequenceBehavior::default();
 	assert_eq!(def.audio_stream_count(), 0);
 }

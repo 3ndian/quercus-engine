@@ -159,6 +159,21 @@ pub fn render_frame(
 		return Err(Error::Failed("已取消".into()));
 	}
 
+	// Before the GL context is first created, tell the bridge which GPU
+	// the engine is on (multi-GPU Linux). This is a preference only; a
+	// mismatch falls back to the first usable device.
+	#[cfg(target_os = "linux")]
+	if let Texture::Gpu { ctx, .. } = &job.dst {
+		if let Some(gpu) = ctx
+			.as_any()
+			.and_then(|a| a.downcast_ref::<quercus_core::backend::GpuContext>())
+		{
+			if let Some(name) = gpu.adapter_name() {
+				crate::gl_bridge::set_preferred_renderer(&name);
+			}
+		}
+	}
+
 	// 2. use_opengl（pluginrenderer.cpp:1446-1457）：插件声明 GL 支持
 	// 且渲染器是 OpenGL 且像素深度协商可行（管线 F32 满足插件
 	// kOfxOpenGLPropPixelDepth 声明）且目标纹理有有效 GL 名（= 桥能为

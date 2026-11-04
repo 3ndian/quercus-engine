@@ -275,6 +275,9 @@ fn gl_plugin_renders_zero_copy_on_linux() {
 			Some(capture_msg),
 			&mut captured as *mut _ as *mut c_void,
 		);
+		let fds_before = std::fs::read_dir("/proc/self/fd")
+			.map(|d| d.count())
+			.unwrap_or(0);
 		let before = quercus_core::backend::gpu_transfer_counters();
 		let readbacks_before = quercus_ofx_plugin::gl_bridge::gl_readback_count();
 		let mut out = None;
@@ -285,6 +288,13 @@ fn gl_plugin_renders_zero_copy_on_linux() {
 			out = Some(rendered);
 		}
 		let out = out.expect("at least one frame");
+		let fds_after = std::fs::read_dir("/proc/self/fd")
+			.map(|d| d.count())
+			.unwrap_or(0);
+		assert!(
+			fds_after <= fds_before + 4,
+			"zero-copy leaked file descriptors: {fds_before} -> {fds_after}"
+		);
 		quercus_ofx_plugin::suites::message::set_handler(None, std::ptr::null_mut());
 		let after = quercus_core::backend::gpu_transfer_counters();
 		assert_eq!(

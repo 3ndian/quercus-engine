@@ -2945,6 +2945,7 @@ mod tests {
 			channel_layout: 0x3,
 			channels: 2,
 			montage: Vec::new(),
+			bus_effects: Vec::new(),
 		};
 		assert_eq!(
 			s.render_audio_ticket_to_slot(&spec).unwrap_err(),
@@ -2991,6 +2992,7 @@ mod tests {
 					}],
 				}],
 			}],
+			bus_effects: Vec::new(),
 		};
 		let params = s.audio_ticket_params(&spec).expect("valid geometry");
 		assert_eq!(params.viewer, 0);
@@ -3447,6 +3449,7 @@ mod tests {
 			channel_layout: 0x3,
 			channels: 2,
 			montage: Vec::new(),
+			bus_effects: Vec::new(),
 		};
 		assert_eq!(
 			s.render_audio_ticket_to_slot(&spec).unwrap_err(),

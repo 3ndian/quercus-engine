@@ -60,6 +60,44 @@ wgpu/Vulkan 设备
   `GL_RENDERER` 与 `GpuContext::adapter_name()` 做名称比对；不匹配
   就禁用零拷贝。多 GPU 精确匹配（LUID/PCI）放第二阶段。
 
+### 2.2.1 测试环境建议（重要）
+
+当前开发机只有一块 NVIDIA RTX 5070 Ti，Windows VM 是 `qxl-vga`
+（无 GPU passthrough），不能验证 WGL/Vulkan 外存。可用的硬件方案按
+成功率排序：
+
+1. **Linux 用 AMD 核显，NVIDIA 直通给 Windows**（推荐）
+   - 7900X 有 Raphael 核显；BIOS 启用 iGPU，显示器接主板；
+   - NVIDIA 走 `vfio-pci` 直通给 Windows；
+   - Windows 上的 NVIDIA 驱动最可能提供
+     `GL_EXT_memory_object_win32`，适合验证本功能。
+2. **另一台物理 Windows 机器**（NVIDIA/AMD 独显）
+   - 最稳定；通过 SSH 接入。
+3. **AMD 核显直通给 Windows**
+   - 技术上可行，但 AMD Windows OpenGL 驱动对
+     `GL_EXT_memory_object` / `_win32` 的支持需要先探针验证；
+   - 有 [AMD 社区报告](https://community.amd.com/t5/opengl-vulkan/d3d12-gl-interop-gl-extension-gl-ext-memory-object-results-in/m-p/438533)
+     反映 D3D12↔GL 的 `GL_EXT_memory_object` 返回 `INVALID_ENUM`，
+     不能假设可用；
+   - 即使直通成功，若 GL 扩展缺失，本功能仍然不能用。
+4. **当前 QEMU 无 GPU VM**
+   - 只能做 Windows 编译/单测，不能做零拷贝验收。
+
+iGPU 直通注意事项：
+
+- BIOS 启用 iGPU、Above 4G Decoding、IOMMU；
+- Linux 侧 `vfio-pci` 绑定 iGPU（或让 Linux 用 iGPU、NVIDIA 绑定
+  vfio）；
+- 检查 `/sys/kernel/iommu_groups`，iGPU 不能和关键 USB/音频设备
+  共享不可分离的组；
+- Windows 里用 `vulkaninfo` + GL 扩展探针确认：
+  - `VK_KHR_external_memory_win32`
+  - `GL_EXT_memory_object_win32`
+- 若 Windows 仍以 QXL 为主显示，WGL 可能选到 QXL；需要：
+  - 把 iGPU/独显设为 Windows 首选 GPU，或
+  - 给 iGPU 输出接 dummy HDMI/DP，或
+  - 使用 `WGL_AMD_gpu_association` 显式选 GPU（第二阶段再做）。
+
 ### 2.3 格式与布局
 
 第一版固定：
