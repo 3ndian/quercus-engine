@@ -295,6 +295,10 @@ destroy, props, swap_requested, redraw_requested}`、`host::KEY_*` 关键码、
 - **依赖登记**：`thiserror`（dependencies）——为 crate 错误枚举
   （src/error.rs）派生 `Display` + `std::error::Error` 的惯例实现；
   项目内其他模块（quercusotio 等）已采用同版本（"2"），避免手写样板。
+- **依赖登记**：`libloading` + `libc`（仅 Linux target）——OpenFX GL
+  真正 GPU 零拷贝需要 EGL/GL 动态加载（避免无 GL 头文件/库的构建环境
+  硬链接）以及 `dup(2)` 导出 fd；两者均只在 Linux 编译，不影响
+  macOS/Windows 构建。
 - suite 函数表经 `suite_v1()` 等 accessor 暴露（`static` 初始化
   放 lazy/OnceLock 里），`fetch_suite` 只查表。
 - **GL 上下文归属**：quercusplugin 不持有 GL 上下文（C ABI 无
