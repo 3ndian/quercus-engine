@@ -400,19 +400,28 @@ fn shared_slot() -> &'static Mutex<SharedSlot> {
 	})
 }
 
-/// Whether Linux/Windows Vulkan OpenFX GL zero-copy allocation is
-/// requested.
+/// Whether Vulkan OpenFX GL zero-copy allocation is requested.
 ///
-/// Default on for Linux and Windows; `QUERCUS_OFX_GPU_ZEROCOPY=0` /
-/// `false` disables it (the plugin path then keeps the CPU/GL-readback
-/// fallback). The actual external allocation is still best-effort per
-/// texture.
+/// Linux is the first-class platform: default on, disabled with
+/// `QUERCUS_OFX_GPU_ZEROCOPY=0` / `false`.
+///
+/// Windows is **experimental and unverified**: default off, enabled only
+/// with `QUERCUS_OFX_GPU_ZEROCOPY=1` / `true`. The runtime still checks
+/// `VK_KHR_external_memory_win32` and the GL memory-object extension; any
+/// failure falls back to the existing CPU/GL-readback path.
 fn zerocopy_requested() -> bool {
-	#[cfg(any(target_os = "linux", target_os = "windows"))]
+	#[cfg(target_os = "linux")]
 	{
 		!matches!(
 			std::env::var("QUERCUS_OFX_GPU_ZEROCOPY").ok().as_deref(),
 			Some("0") | Some("false") | Some("FALSE") | Some("False")
+		)
+	}
+	#[cfg(target_os = "windows")]
+	{
+		matches!(
+			std::env::var("QUERCUS_OFX_GPU_ZEROCOPY").ok().as_deref(),
+			Some("1") | Some("true") | Some("TRUE") | Some("True")
 		)
 	}
 	#[cfg(not(any(target_os = "linux", target_os = "windows")))]

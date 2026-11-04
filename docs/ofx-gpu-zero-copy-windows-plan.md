@@ -1,12 +1,32 @@
 # OpenFX 真正 GPU 零拷贝：Windows 接入计划
 
-状态：代码已实现，待 Windows 真机验收（Vulkan-only，无 DX12）
+状态：**实验性 / 未验证**；默认关闭。代码已实现，MSVC 交叉编译通过，但尚未在真实 Windows GPU 上验收（Vulkan-only，无 DX12）
 前置：Linux/Vulkan + EGL 第一版已落地（`22b2d3d`）
 目标：Windows 上 OFX GL 插件输入/输出同一块 GPU 显存，无
 `glReadPixels`、无 CPU `Frame`、无 upload/download。
 不包含：Windows 上 Oak 预览器的最终 present 零拷贝（另列）。
 明确不做：DX12/D3D12 纹理导出、D3D11↔GL interop（`WGL_NV_DX_interop2`）。
 Windows 只接 Vulkan + WGL 这一条路；不可用就回退现有路径。
+
+## 0. 发布策略：实验性
+
+- Linux 是唯一正式支持的零拷贝平台；
+- Windows 路径默认关闭，只有显式设置
+  `QUERCUS_OFX_GPU_ZEROCOPY=1` 才尝试；
+- 未在真实 Windows GPU 完成阶段 0、阶段 3 验收前：
+  - 不写进发布说明的“已完成能力”；
+  - 不默认启用；
+  - 不把它作为 Windows 版本的质量承诺；
+- 验收通过后再决定是否改为默认开启。
+
+测试时必须显式打开：
+
+```powershell
+$env:QUERCUS_OFX_GPU_ZEROCOPY = "1"
+$env:QUERCUS_GPU_TESTS = "1"
+$env:QUERCUS_REQUIRE_GPU = "1"
+cargo test -p quercus-ofx-plugin --test gl_render_test gl_plugin_renders_zero_copy -- --nocapture
+```
 
 ## 1. Linux 第一版的可复用结论
 
