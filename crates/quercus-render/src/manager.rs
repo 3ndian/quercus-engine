@@ -214,11 +214,13 @@ impl RenderManager {
 				// the producer's footage decodes rendezvous with. Audio
 				// stays inline, as on the process backend.
 				//
-				// M3: one OFX host process serves every plugin job the
-				// in-process render thread evaluates (isolation without a
-				// pool). The client starts lazily on the first plugin job.
-				let host = crate::ofxhost::OfxHost::new(crate::ofxhost::OfxHostConfig::default())?;
-				crate::ofxhost::install_client(Some(host.clone()));
+				// No OFX host process: the in-process quercusplugin
+				// executor installed by the frontend renders plugins on the
+				// same render thread. This is what removes the worker
+				// process dependency; GPU texture sharing is not implied
+				// (the in-process executor's render path is still the
+				// CPU/GL-readback path).
+				crate::ofxhost::install_client(None);
 				let pipeline = crate::pipeline::PipelineBackend::new()?;
 				let inline = InlineDispatcher::sync();
 				(
@@ -227,7 +229,7 @@ impl RenderManager {
 					None,
 					None,
 					Some(pipeline),
-					Some(host),
+					None,
 				)
 			}
 		};
