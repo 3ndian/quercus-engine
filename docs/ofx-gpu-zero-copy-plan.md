@@ -453,7 +453,11 @@ Windows：
 - 第一版用 `glFinish + queue wait idle`，尚未接 external semaphore；
 - 多 GPU 时 EGL device 选择目前优先非 Mesa 设备，未做 Vulkan UUID
   精确匹配；
-- macOS/Windows 未接。
+- macOS/Windows 未接；
+- Oak 已更新 submodule 并通过 `cargo check`，引擎侧 OFX 边界零拷贝；
+  Oak 预览器目前仍把最终显示样本上传为 RGBA16F（`oakui/gpu.rs`），
+  还没有把引擎纹理直接注册给 GPUI——这是下一步独立的 present 路径
+  工作，不影响 OFX 插件输入/输出零拷贝的结论。
 
 ## 5. 代码改动清单
 
