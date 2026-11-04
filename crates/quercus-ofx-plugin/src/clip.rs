@@ -41,6 +41,10 @@ pub struct ClipInstance {
 	pub name: String,
 	/// 当前输入纹理（quercusrender 值；输出 clip 为 None）。
 	input_texture: std::sync::Mutex<Option<crate::render::Texture>>,
+	/// Linux zero-copy: the GL texture imported from the input's
+	/// `OPAQUE_FD` memory (same pixels, no CPU download/upload).
+	#[cfg(target_os = "linux")]
+	input_gl_texture: std::sync::Mutex<Option<crate::gl_bridge::GlMemoryTexture>>,
 	/// 当前输出纹理（C++ `output_textures_` 的 phase 1 单槽；
 	/// [`store_output_image`](Self::store_output_image) 的回写目标；
 	/// 输入 clip 为 None）。
@@ -89,7 +93,8 @@ impl ClipInstance {
 			props.set_one(
 				crate::host::PROP_CLIP_COLOURSPACE,
 				crate::property::Value::String(
-                    std::ffi::CString::new(quercus_core::color::pipeline_working_ofx_name()).unwrap(),
+					std::ffi::CString::new(quercus_core::color::pipeline_working_ofx_name())
+						.unwrap(),
 				),
 			);
 		}
@@ -106,6 +111,8 @@ impl ClipInstance {
 			props,
 			name,
 			input_texture: std::sync::Mutex::new(None),
+			#[cfg(target_os = "linux")]
+			input_gl_texture: std::sync::Mutex::new(None),
 			output_texture: std::sync::Mutex::new(None),
 		}
 	}
@@ -165,6 +172,35 @@ impl ClipInstance {
 			crate::property::Value::Int(connected),
 		);
 		*self.input_texture.lock().unwrap_or_else(|e| e.into_inner()) = texture;
+	}
+
+	/// Linux zero-copy: attach the GL texture imported from this clip's
+	/// GPU input. `clipLoadTexture` then returns its real name without a
+	/// `fetch_image` download.
+	#[cfg(target_os = "linux")]
+	pub fn set_input_gl_texture(&self, texture: Option<crate::gl_bridge::GlMemoryTexture>) {
+		*self
+			.input_gl_texture
+			.lock()
+			.unwrap_or_else(|e| e.into_inner()) = texture;
+	}
+
+	/// Linux zero-copy: the attached GL texture's `(name, width, height)`.
+	#[cfg(target_os = "linux")]
+	pub fn input_gl_texture_info(&self) -> Option<(i32, i32, i32)> {
+		self.input_gl_texture
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.as_ref()
+			.map(|t| (t.name, t.width, t.height))
+	}
+
+	/// 当前输入纹理的克隆（保持后端 token 存活；零拷贝输入分支用）。
+	pub fn input_texture_value(&self) -> Option<crate::render::Texture> {
+		self.input_texture
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.clone()
 	}
 
 	/// 挂接输出纹理（render 驱动创建并经值传入；C++
@@ -265,9 +301,7 @@ impl ClipInstance {
 			let s = y * row;
 			for i in 0..samples_per_row {
 				let v = match format {
-					f if f == crate::render::PIXEL_FORMAT_U8 => {
-						src_bytes[s + i] as f32 / 255.0
-					}
+					f if f == crate::render::PIXEL_FORMAT_U8 => src_bytes[s + i] as f32 / 255.0,
 					f if f == quercus_core::PixelFormat::U16 as i32 => {
 						let off = s + i * 2;
 						let bits = u16::from_le_bytes([src_bytes[off], src_bytes[off + 1]]);
@@ -520,9 +554,15 @@ mod tests {
 	fn components_from_props_matrix() {
 		use crate::property::Value;
 		for (s, want) in [
-			("OfxImageComponentRGBA", Some(crate::image::Components::Rgba)),
+			(
+				"OfxImageComponentRGBA",
+				Some(crate::image::Components::Rgba),
+			),
 			("OfxImageComponentRGB", Some(crate::image::Components::Rgb)),
-			("OfxImageComponentAlpha", Some(crate::image::Components::Alpha)),
+			(
+				"OfxImageComponentAlpha",
+				Some(crate::image::Components::Alpha),
+			),
 			("OfxImageComponentBogus", None),
 		] {
 			let set = PropertySet::new();
@@ -567,9 +607,7 @@ mod tests {
 		] {
 			let c = test_clip("Source");
 			c.set_video_params(4, ch);
-			let got = c
-				.props
-				.get(crate::image::K_IMAGE_EFFECT_PROP_COMPONENTS, 0);
+			let got = c.props.get(crate::image::K_IMAGE_EFFECT_PROP_COMPONENTS, 0);
 			assert!(
 				matches!(got, Some(Value::String(s)) if s.to_string_lossy() == want),
 				"channels {ch}"
@@ -582,7 +620,11 @@ mod tests {
 	fn fetch_image_rejects_region_and_unusable_input() {
 		let c = test_clip("Source");
 		assert!(matches!(
-			c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, Some(OfxRectD::default())),
+			c.fetch_image(
+				0.0,
+				RenderScale { x: 1.0, y: 1.0 },
+				Some(OfxRectD::default())
+			),
 			Err(crate::error::Error::Failed(_))
 		));
 		assert!(matches!(
@@ -601,8 +643,14 @@ mod tests {
 	fn fetch_image_converts_all_input_depths() {
 		// U8：归一化到 [0,1]。
 		let c = test_clip("Source");
-		connect(&c, frame_with(1, 1, quercus_core::PixelFormat::U8, &[0, 255, 128, 64]));
-		let got = samples(&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap());
+		connect(
+			&c,
+			frame_with(1, 1, quercus_core::PixelFormat::U8, &[0, 255, 128, 64]),
+		);
+		let got = samples(
+			&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+				.unwrap(),
+		);
 		assert_eq!(got[0], 0.0);
 		assert_eq!(got[1], 1.0);
 		assert!((got[2] - 128.0 / 255.0).abs() < 1e-7);
@@ -615,7 +663,10 @@ mod tests {
 			bytes.extend_from_slice(&v.to_le_bytes());
 		}
 		connect(&c, frame_with(1, 1, quercus_core::PixelFormat::U16, &bytes));
-		let got = samples(&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap());
+		let got = samples(
+			&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+				.unwrap(),
+		);
 		assert_eq!(got[0], 0.0);
 		assert_eq!(got[1], 1.0);
 		assert!((got[2] - 32768.0 / 65535.0).abs() < 1e-7);
@@ -628,7 +679,10 @@ mod tests {
 			bytes.extend_from_slice(&v.to_le_bytes());
 		}
 		connect(&c, frame_with(1, 1, quercus_core::PixelFormat::F16, &bytes));
-		let got = samples(&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap());
+		let got = samples(
+			&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+				.unwrap(),
+		);
 		assert_eq!(got[0], 1.0);
 		assert_eq!(got[1], 0.0, "F16 NaN 应清洗为 0");
 		assert_eq!(got[2], 0.0, "F16 Inf 应清洗为 0");
@@ -641,7 +695,10 @@ mod tests {
 			bytes.extend_from_slice(&v.to_le_bytes());
 		}
 		connect(&c, frame_with(1, 1, quercus_core::PixelFormat::F32, &bytes));
-		let got = samples(&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap());
+		let got = samples(
+			&c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+				.unwrap(),
+		);
 		assert_eq!(got[0], 0.0);
 		assert_eq!(got[1], 0.0);
 		assert_eq!(got[2], 0.0);
@@ -653,7 +710,10 @@ mod tests {
 	fn fetch_image_rejects_unsupported_format() {
 		let c = test_clip("Source");
 		// U10 = 4 字节/通道打包格式；管线仅支持 U8/U16/F16/F32。
-		connect(&c, frame_with(1, 1, quercus_core::PixelFormat::U10, &[0u8; 16]));
+		connect(
+			&c,
+			frame_with(1, 1, quercus_core::PixelFormat::U10, &[0u8; 16]),
+		);
 		let res = c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None);
 		assert!(matches!(res, Err(crate::error::Error::Failed(_))));
 	}
@@ -670,7 +730,9 @@ mod tests {
 			crate::image::K_IMAGE_EFFECT_PROP_PIXEL_DEPTH,
 			Value::String(cs("OfxBitDepthByte")),
 		);
-		let img = c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap();
+		let img = c
+			.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+			.unwrap();
 		assert_eq!(img.depth(), crate::image::BitDepth::Byte);
 
 		let c = test_clip("Source");
@@ -679,14 +741,18 @@ mod tests {
 			crate::image::K_IMAGE_EFFECT_PROP_PIXEL_DEPTH,
 			Value::String(cs("OfxBitDepthBogus")),
 		);
-		let img = c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap();
+		let img = c
+			.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+			.unwrap();
 		assert_eq!(img.depth(), crate::image::BitDepth::Float);
 
 		let c = test_clip("Source");
 		connect(&c, f32_frame(1, 1, 0.5));
 		c.props
 			.set_one(crate::image::K_IMAGE_EFFECT_PROP_PIXEL_DEPTH, Value::Int(4));
-		let img = c.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None).unwrap();
+		let img = c
+			.fetch_image(0.0, RenderScale { x: 1.0, y: 1.0 }, None)
+			.unwrap();
 		assert_eq!(img.depth(), crate::image::BitDepth::Float);
 	}
 
@@ -758,7 +824,11 @@ mod tests {
 			quercus_core::backend::BackendKind::Cpu
 		}
 		fn destroy_texture(&self, _token: u64) {}
-		fn upload(&self, token: u64, frame: &crate::render::Frame) -> quercus_render::error::Result<()> {
+		fn upload(
+			&self,
+			token: u64,
+			frame: &crate::render::Frame,
+		) -> quercus_render::error::Result<()> {
 			if self.fail_upload {
 				return Err(quercus_render::error::Error::State);
 			}

@@ -22,6 +22,12 @@ quercus-render = { version = "=0.6.0", path = "../quercus-render" }
 # Error derive（Display + std::error::Error，见 src/error.rs）；理由已登记 README。
 thiserror = "2"
 
+# Linux OpenFX GL zero-copy: EGL/GL are loaded dynamically so the crate
+# still builds on hosts without libEGL/libGL.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+libc = "0.2"
+
 [features]
 # 历史 feature（原桥测试桩开关）：单库化后 quercusnode/quercusrender/quercusundo
 # 以 path 依赖直连，句柄式调用面改为本地桩（见 src/node.rs /

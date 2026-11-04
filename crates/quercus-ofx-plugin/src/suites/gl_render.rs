@@ -179,8 +179,8 @@ pub(crate) fn purge_leftovers() {
 	live.retain(|_, (_, _, is_output, _)| *is_output);
 	drop(live);
 	for gl in dropped.into_iter().flatten() {
- 			delete_gl_texture_if_gl(gl);
- 		}
+		delete_gl_texture_if_gl(gl);
+	}
 }
 
 /// 公共入口模板：panic 兜底。
@@ -345,6 +345,34 @@ unsafe extern "C" fn clip_load_texture(
 			return Ok(());
 		}
 
+		// Linux GPU 零拷贝：该 clip 的输入已由渲染驱动从同一块 Vulkan
+		// 显存导入为 GL 纹理；直接返回真实名，跳过 fetch_image 下载
+		// 与 create_input_texture 上传。
+		#[cfg(target_os = "linux")]
+		if let Some((gl_name, gl_w, gl_h)) = c.input_gl_texture_info() {
+			let tex = c
+				.input_texture_value()
+				.unwrap_or_else(crate::render::Texture::dummy);
+			let premult = clip_string(c, "OfxImageEffectPropPreMultiplication", PREMULT_NONE);
+			let row_bytes = gl_w.saturating_mul(16);
+			let props = make_texture_props(
+				gl_w as f64,
+				gl_h as f64,
+				crate::image::Components::Rgba,
+				gl.gl_pixel_depth,
+				&premult,
+				clip_par(c),
+				scale,
+				row_bytes,
+				gl_name,
+			);
+			// gl_texture=None：句柄释放时不删除 GL 纹理；渲染驱动统一
+			// 清理导入的零拷贝纹理（避免 glDeleteTextures 重复）。
+			let addr = register(Box::new(props), tex, false, None);
+			unsafe { *out = tag::make(addr as *const PropertySet, tag::PROPERTY_SET) };
+			return Ok(());
+		}
+
 		// 输入 clip：Phase 2 仅支持整帧（fetch_image 的 phase-1 约束）。
 		if !region.is_null() {
 			return Err(status::FAILED);
@@ -377,12 +405,8 @@ unsafe extern "C" fn clip_load_texture(
 		// 真实名；GL 上传失败 → 显式 Failed（插件按规范继续）。非 GL
 		// 上下文（本函数仅在 GL 渲染期可达，此分支是 CPU 纹理兜底）：
 		// 仍建 CPU 纹理、索引 0。
-		let gl_tex = crate::gl_bridge::create_input_texture(
-			w as i32,
-			h as i32,
-			image.pixels(),
-		)
-		.ok();
+		let gl_tex =
+			crate::gl_bridge::create_input_texture(w as i32, h as i32, image.pixels()).ok();
 		let params = crate::render::VideoParams {
 			width: w as i32,
 			height: h as i32,
@@ -555,7 +579,10 @@ mod tests {
 		) -> quercus_render::error::Result<()> {
 			Ok(())
 		}
-		fn download(&self, _token: u64) -> quercus_render::error::Result<quercus_core::texture::Frame> {
+		fn download(
+			&self,
+			_token: u64,
+		) -> quercus_render::error::Result<quercus_core::texture::Frame> {
 			Ok(quercus_core::texture::Frame::new())
 		}
 		fn blit(
@@ -651,10 +678,19 @@ mod tests {
 	#[test]
 	fn format_components_matrix() {
 		use crate::image::Components;
-		assert_eq!(format_components(Some(GL_FORMAT_RGBA)), Some(Components::Rgba));
+		assert_eq!(
+			format_components(Some(GL_FORMAT_RGBA)),
+			Some(Components::Rgba)
+		);
 		assert_eq!(format_components(None), Some(Components::Rgba));
-		assert_eq!(format_components(Some(GL_FORMAT_RGB)), Some(Components::Rgb));
-		assert_eq!(format_components(Some(GL_FORMAT_ALPHA)), Some(Components::Alpha));
+		assert_eq!(
+			format_components(Some(GL_FORMAT_RGB)),
+			Some(Components::Rgb)
+		);
+		assert_eq!(
+			format_components(Some(GL_FORMAT_ALPHA)),
+			Some(Components::Alpha)
+		);
 		assert_eq!(format_components(Some(GL_FORMAT_LUMINANCE)), None);
 		assert_eq!(format_components(Some(GL_FORMAT_LUMINANCE_ALPHA)), None);
 		assert_eq!(format_components(Some("bogus")), None);
@@ -690,10 +726,7 @@ mod tests {
 		);
 		assert_eq!(prop_double(&props, crate::host::PROP_RENDER_SCALE, 0), 2.0);
 		assert_eq!(prop_double(&props, crate::host::PROP_RENDER_SCALE, 1), 3.0);
-		assert_eq!(
-			prop_double(&props, "OfxImagePropPixelAspectRatio", 0),
-			1.5
-		);
+		assert_eq!(prop_double(&props, "OfxImagePropPixelAspectRatio", 0), 1.5);
 		for (i, want) in [0, 0, 4, 2].iter().enumerate() {
 			assert_eq!(
 				prop_int(&props, crate::image::K_IMAGE_PROP_BOUNDS, i),
@@ -706,11 +739,11 @@ mod tests {
 				"RoD[{i}]"
 			);
 		}
-		assert_eq!(prop_int(&props, crate::image::K_IMAGE_PROP_ROW_BYTES, 0), 48);
 		assert_eq!(
-			prop_string(&props, "OfxImagePropField", 0),
-			"OfxFieldNone"
+			prop_int(&props, crate::image::K_IMAGE_PROP_ROW_BYTES, 0),
+			48
 		);
+		assert_eq!(prop_string(&props, "OfxImagePropField", 0), "OfxFieldNone");
 		assert!(matches!(
 			props.get(crate::image::K_IMAGE_PROP_UNIQUE_ID, 0),
 			Some(Value::String(_))
@@ -881,7 +914,10 @@ mod tests {
 			prop_int(&props, crate::image::K_IMAGE_PROP_ROW_BYTES, 0),
 			4 * 4 * 4
 		);
-		assert!(LIVE_TEXTURES.lock().unwrap().contains_key(&(tag::strip(handle) as usize)));
+		assert!(LIVE_TEXTURES
+			.lock()
+			.unwrap()
+			.contains_key(&(tag::strip(handle) as usize)));
 
 		// free：输出 clip 只释放句柄、不删纹理（宿主还要回读）。
 		unsafe {
@@ -893,7 +929,10 @@ mod tests {
 				status::ERR_BAD_HANDLE
 			);
 		}
-		assert!(!LIVE_TEXTURES.lock().unwrap().contains_key(&(tag::strip(handle) as usize)));
+		assert!(!LIVE_TEXTURES
+			.lock()
+			.unwrap()
+			.contains_key(&(tag::strip(handle) as usize)));
 
 		// output_gl_texture = None → 索引 0（CPU 回退语义）。
 		crate::suites::set_gl_ctx(Some(gl_ctx(f32_texture(2, 2, 0.0), None)));
@@ -945,6 +984,9 @@ mod tests {
 	#[test]
 	fn clip_load_texture_input_clip() {
 		let _lock = suite_lock();
+		// Linux/macOS 真实 GL 桥：clipLoadTexture 的 GL 上传要求上下文
+		// current（生产路径由 render_driver 的 GlGuard 保证）。
+		let _gl = crate::gl_bridge::acquire().ok();
 		let s = suite_v1();
 		let c = clip("Source");
 		c.set_input_texture(Some(f32_texture(2, 2, 0.5)), 0.0);
@@ -987,13 +1029,7 @@ mod tests {
 		unsafe {
 			let mut h: *mut c_void = std::ptr::null_mut();
 			assert_eq!(
-				(s.clip_load_texture)(
-					clip_handle(&c),
-					0.0,
-					rgb.as_ptr(),
-					std::ptr::null(),
-					&mut h,
-				),
+				(s.clip_load_texture)(clip_handle(&c), 0.0, rgb.as_ptr(), std::ptr::null(), &mut h,),
 				status::FAILED
 			);
 		}
@@ -1046,15 +1082,33 @@ mod tests {
 		let mut h4: *mut c_void = std::ptr::null_mut();
 		unsafe {
 			assert_eq!(
-				(s.clip_load_texture)(clip_handle(&c), 0.0, rgba.as_ptr(), std::ptr::null(), &mut h2),
+				(s.clip_load_texture)(
+					clip_handle(&c),
+					0.0,
+					rgba.as_ptr(),
+					std::ptr::null(),
+					&mut h2
+				),
 				status::OK
 			);
 			assert_eq!(
-				(s.clip_load_texture)(clip_handle(&c), 0.0, lum.as_ptr(), std::ptr::null(), &mut h3),
+				(s.clip_load_texture)(
+					clip_handle(&c),
+					0.0,
+					lum.as_ptr(),
+					std::ptr::null(),
+					&mut h3
+				),
 				status::OK
 			);
 			assert_eq!(
-				(s.clip_load_texture)(clip_handle(&c), 0.0, lum_a.as_ptr(), std::ptr::null(), &mut h4),
+				(s.clip_load_texture)(
+					clip_handle(&c),
+					0.0,
+					lum_a.as_ptr(),
+					std::ptr::null(),
+					&mut h4
+				),
 				status::OK
 			);
 			// 非 UTF-8 format 串按 None 处理（宿主自选）→ OK。
@@ -1175,8 +1229,14 @@ mod tests {
 				status::OK
 			);
 		}
-		assert!(LIVE_TEXTURES.lock().unwrap().contains_key(&(tag::strip(input_handle) as usize)));
-		assert!(LIVE_TEXTURES.lock().unwrap().contains_key(&(tag::strip(out_handle) as usize)));
+		assert!(LIVE_TEXTURES
+			.lock()
+			.unwrap()
+			.contains_key(&(tag::strip(input_handle) as usize)));
+		assert!(LIVE_TEXTURES
+			.lock()
+			.unwrap()
+			.contains_key(&(tag::strip(out_handle) as usize)));
 
 		purge_leftovers();
 		let live = LIVE_TEXTURES.lock().unwrap();

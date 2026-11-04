@@ -74,6 +74,8 @@ static const char *marker_env(const char *name)
  * Linux/Windows 的 GL 桥是 stub，绘制代码随 __APPLE__ 排除）。 */
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
+#elif defined(__linux__)
+#include <GL/gl.h>
 #endif
 
 /* kOfxImageEffectGLFormatRGBA 在 vendored ofxOpenGLRender.h 是 stub
@@ -513,13 +515,10 @@ static OfxStatus actionGLDetached(OfxImageEffectHandle handle)
  * （宿主侧测试经 message 捕获断言）。GL 未使能时回退 CPU render。 */
 static void draw_gl_test_pattern(void)
 {
-#ifdef __APPLE__
-    /* 把当前绑定帧缓冲（宿主为输出帧挂的 FBO）清成已知颜色。 */
+    /* 把当前绑定帧缓冲（宿主为输出帧挂的 FBO）清成已知颜色。
+     * Linux 的 EGL/GL 桥现在也是真实实现，因此不再限于 Apple。 */
     glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-#else
-    (void)0;
-#endif
 }
 
 static OfxStatus actionRenderGL(OfxImageEffectHandle inst, OfxPropertySetHandle inArgs)

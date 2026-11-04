@@ -47,9 +47,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use quercus_node::factory::{DynNodeConstructor, DynamicNodeMeta};
 use quercus_node::input::{flags as input_flags, Input};
 use quercus_node::node::{Category, NodeBehavior, NodeCore};
-use quercus_node::nodes::plugin::{
-    PluginInstanceHandle, PluginNode, SOURCE_CLIP, TEXTURE_INPUT,
-};
+use quercus_node::nodes::plugin::{PluginInstanceHandle, PluginNode, SOURCE_CLIP, TEXTURE_INPUT};
 use quercus_node::value::{NodeValue, ValueType};
 
 use crate::handle::RefBox;
@@ -167,7 +165,9 @@ fn project_extent_slot() -> &'static Mutex<(f64, f64)> {
 }
 
 fn project_extent() -> (f64, f64) {
-	*project_extent_slot().lock().unwrap_or_else(|e| e.into_inner())
+	*project_extent_slot()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
 }
 
 /// C++ to_canonical（plugin.cpp:52-55）。
@@ -250,8 +250,14 @@ fn default_value_for_param(def: &ParamDef) -> Option<NodeValue> {
 			Some(NodeValue::Color([values[0], values[1], values[2], alpha]))
 		}
 		ofx::TYPE_DOUBLE2D | ofx::TYPE_DOUBLE3D | ofx::TYPE_INTEGER2D | ofx::TYPE_INTEGER3D => {
-			let is_double = matches!(def.ofx_type.as_str(), ofx::TYPE_DOUBLE2D | ofx::TYPE_DOUBLE3D);
-			let count = if matches!(def.ofx_type.as_str(), ofx::TYPE_DOUBLE2D | ofx::TYPE_INTEGER2D) {
+			let is_double = matches!(
+				def.ofx_type.as_str(),
+				ofx::TYPE_DOUBLE2D | ofx::TYPE_DOUBLE3D
+			);
+			let count = if matches!(
+				def.ofx_type.as_str(),
+				ofx::TYPE_DOUBLE2D | ofx::TYPE_INTEGER2D
+			) {
 				2
 			} else {
 				3
@@ -320,7 +326,10 @@ fn cached_defaults(
 	let mut defaults = HashMap::new();
 	for p in &params.params {
 		let ofx_type = p.def.ofx_type.as_str();
-		if ofx_type == ofx::TYPE_GROUP || ofx_type == ofx::TYPE_PAGE || ofx_type == ofx::TYPE_PUSHBUTTON {
+		if ofx_type == ofx::TYPE_GROUP
+			|| ofx_type == ofx::TYPE_PAGE
+			|| ofx_type == ofx::TYPE_PUSHBUTTON
+		{
 			continue;
 		}
 		if p.def.name.is_empty() {
@@ -484,12 +493,20 @@ fn build_core(inst: &Instance) -> NodeCore {
 				let label = prop_str(&def.props, ofx::PROP_LABEL, 0);
 				group_labels.insert(
 					def.name.clone(),
-					if label.is_empty() { def.name.clone() } else { label },
+					if label.is_empty() {
+						def.name.clone()
+					} else {
+						label
+					},
 				);
 			}
 			ofx::TYPE_PAGE => {
 				let label = prop_str(&def.props, ofx::PROP_LABEL, 0);
-				let page_label = if label.is_empty() { def.name.clone() } else { label };
+				let page_label = if label.is_empty() {
+					def.name.clone()
+				} else {
+					label
+				};
 				let count = def.props.dimension(ofx::P_PAGE_CHILD);
 				for i in 0..count {
 					let child = prop_str(&def.props, ofx::P_PAGE_CHILD, i);
@@ -532,7 +549,11 @@ fn build_core(inst: &Instance) -> NodeCore {
 			input.flags |= input_flags::HIDDEN;
 		}
 		let label = prop_str(&def.props, ofx::PROP_LABEL, 0);
-		input.display_name = if label.is_empty() { input_id.clone() } else { label };
+		input.display_name = if label.is_empty() {
+			input_id.clone()
+		} else {
+			label
+		};
 
 		let parent = prop_str(&def.props, ofx::P_PARENT, 0);
 		if !parent.is_empty() {
@@ -640,17 +661,15 @@ fn build_core(inst: &Instance) -> NodeCore {
 			// 值表为 ("combo_value", _)——C++ set_combo_box_strings /
 			// "combo_value_str" 的等价物）。
 			for label in &option_labels {
-				input.properties.push((
-					"combo_option".to_string(),
-					NodeValue::Text(label.clone()),
-				));
+				input
+					.properties
+					.push(("combo_option".to_string(), NodeValue::Text(label.clone())));
 			}
 			if matches!(value_type, ValueType::StrCombo) {
 				for value in &option_values {
-					input.properties.push((
-						"combo_value".to_string(),
-						NodeValue::Text(value.clone()),
-					));
+					input
+						.properties
+						.push(("combo_value".to_string(), NodeValue::Text(value.clone())));
 				}
 			}
 		}
@@ -833,9 +852,9 @@ fn set_text_param(inst: &Instance, key: &str, text: &str) {
 fn execute_plugin_job(
 	req: &quercus_render::eval::PluginJobRequest<'_>,
 ) -> quercus_render::error::Result<quercus_core::texture::Texture> {
-    use quercus_render::error::Error;
+	use quercus_render::error::Error;
 
-    let quercus_render::eval::JobSpec::Plugin {
+	let quercus_render::eval::JobSpec::Plugin {
 		instance,
 		type_id: _,
 		time,
@@ -847,9 +866,8 @@ fn execute_plugin_job(
 		return Err(Error::Invalid);
 	};
 
-	let inst = instance_from_id(*instance).ok_or_else(|| {
-		Error::Failed(format!("插件实例 {instance} 未登记（实例已释放？）"))
-	})?;
+	let inst = instance_from_id(*instance)
+		.ok_or_else(|| Error::Failed(format!("插件实例 {instance} 未登记（实例已释放？）")))?;
 
 	if req.src.is_dummy() {
 		return Err(Error::Failed("plugin job 无可用输入纹理".into()));
@@ -861,9 +879,7 @@ fn execute_plugin_job(
 	let mut pod_values = Vec::new();
 	for (key, nv) in values {
 		match nv {
-			NodeValue::Text(s) | NodeValue::StrCombo(s) => {
-				set_text_param(&inst.value, key, s)
-			}
+			NodeValue::Text(s) | NodeValue::StrCombo(s) => set_text_param(&inst.value, key, s),
 			NodeValue::PushButton | NodeValue::None => {}
 			other => {
 				if let Some(v) = crate::node::Value::from_node_value(other) {
@@ -873,15 +889,53 @@ fn execute_plugin_job(
 		}
 	}
 
-	// 输出纹理：与输入同尺寸的 F32 帧（render_driver 校验 F32）。
-	let dst_frame = quercus_render::eval::generate_frame(
-		quercus_core::Rational::from_double(*time),
-		req.src.size(),
-		quercus_core::PixelFormat::F32,
-	)?;
+	// 输出纹理：与输入同尺寸。GPU 输入且后端支持 OpenFX GL 零拷贝时，
+	// 输出也必须是同一 GpuContext 上的 GPU 纹理；否则保持 CPU F32
+	// （旧路径）。创建失败回退 CPU，不阻断插件。
+	let (w, h) = req.src.size();
+	let dst = match &req.src {
+		quercus_core::texture::Texture::Gpu { ctx, .. } => {
+			let gpu = ctx
+				.as_any()
+				.and_then(|a| a.downcast_ref::<quercus_core::backend::GpuContext>());
+			match gpu {
+				Some(gpu) if gpu.supports_gl_zerocopy() => match gpu.create_texture(w, h) {
+					Ok(token) => quercus_core::texture::Texture::gpu(
+						ctx.clone(),
+						token,
+						w,
+						h,
+						quercus_core::PixelFormat::F32,
+					),
+					Err(err) => {
+						eprintln!("[ofx] GPU output texture unavailable, CPU fallback: {err}");
+						quercus_core::texture::Texture::wrap_frame(
+							quercus_render::eval::generate_frame(
+								quercus_core::Rational::from_double(*time),
+								(w, h),
+								quercus_core::PixelFormat::F32,
+							)?,
+						)
+					}
+				},
+				_ => quercus_core::texture::Texture::wrap_frame(
+					quercus_render::eval::generate_frame(
+						quercus_core::Rational::from_double(*time),
+						(w, h),
+						quercus_core::PixelFormat::F32,
+					)?,
+				),
+			}
+		}
+		_ => quercus_core::texture::Texture::wrap_frame(quercus_render::eval::generate_frame(
+			quercus_core::Rational::from_double(*time),
+			(w, h),
+			quercus_core::PixelFormat::F32,
+		)?),
+	};
 	let job = crate::render_driver::RenderJob {
 		time: *time,
-		dst: quercus_core::texture::Texture::wrap_frame(dst_frame),
+		dst,
 		src: Some(req.src.clone()),
 		effect_input_id: effect_input_id.clone(),
 		inputs: inputs.clone(),
@@ -961,9 +1015,9 @@ fn shared_plugin_instance(identifier: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    /// Records what the mock plugin entry saw, so the push-button test can
+	/// Records what the mock plugin entry saw, so the push-button test can
 	/// assert the kOfxActionInstanceChanged routing and its inArgs.
 	static PUSH_ENTRY_CALLS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -981,7 +1035,9 @@ mod tests {
 	) -> i32 {
 		if !action.is_null() {
 			let action = unsafe {
-				std::ffi::CStr::from_ptr(action).to_string_lossy().into_owned()
+				std::ffi::CStr::from_ptr(action)
+					.to_string_lossy()
+					.into_owned()
 			};
 			if action == crate::host::ACTION_INSTANCE_CHANGED {
 				let mut calls = PUSH_ENTRY_CALLS.lock().unwrap_or_else(|e| e.into_inner());
@@ -991,9 +1047,7 @@ mod tests {
 				let props = unsafe { &*(in_args as *const crate::property::PropertySet) };
 				let reason = props.get(crate::host::PROP_CHANGE_REASON, 0);
 				let reason = match reason {
-					Some(crate::property::Value::String(s)) => {
-						s.to_string_lossy().into_owned()
-					}
+					Some(crate::property::Value::String(s)) => s.to_string_lossy().into_owned(),
 					_ => String::new(),
 				};
 				calls.push(reason);
@@ -1004,62 +1058,23 @@ mod tests {
 
 	#[test]
 	fn input_type_table_covers_all_ofx_kinds() {
-		assert_eq!(
-			input_type_for(ofx::TYPE_INTEGER),
-			Some(ValueType::Int)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_DOUBLE),
-			Some(ValueType::Float)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_BOOLEAN),
-			Some(ValueType::Boolean)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_STRING),
-			Some(ValueType::Text)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_RGB),
-			Some(ValueType::Color)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_RGBA),
-			Some(ValueType::Color)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_CHOICE),
-			Some(ValueType::Combo)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_DOUBLE2D),
-			Some(ValueType::Vec2)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_INTEGER2D),
-			Some(ValueType::Vec2)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_DOUBLE3D),
-			Some(ValueType::Vec3)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_INTEGER3D),
-			Some(ValueType::Vec3)
-		);
+		assert_eq!(input_type_for(ofx::TYPE_INTEGER), Some(ValueType::Int));
+		assert_eq!(input_type_for(ofx::TYPE_DOUBLE), Some(ValueType::Float));
+		assert_eq!(input_type_for(ofx::TYPE_BOOLEAN), Some(ValueType::Boolean));
+		assert_eq!(input_type_for(ofx::TYPE_STRING), Some(ValueType::Text));
+		assert_eq!(input_type_for(ofx::TYPE_RGB), Some(ValueType::Color));
+		assert_eq!(input_type_for(ofx::TYPE_RGBA), Some(ValueType::Color));
+		assert_eq!(input_type_for(ofx::TYPE_CHOICE), Some(ValueType::Combo));
+		assert_eq!(input_type_for(ofx::TYPE_DOUBLE2D), Some(ValueType::Vec2));
+		assert_eq!(input_type_for(ofx::TYPE_INTEGER2D), Some(ValueType::Vec2));
+		assert_eq!(input_type_for(ofx::TYPE_DOUBLE3D), Some(ValueType::Vec3));
+		assert_eq!(input_type_for(ofx::TYPE_INTEGER3D), Some(ValueType::Vec3));
 		assert_eq!(
 			input_type_for(ofx::TYPE_STRCHOICE),
 			Some(ValueType::StrCombo)
 		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_BYTES),
-			Some(ValueType::Binary)
-		);
-		assert_eq!(
-			input_type_for(ofx::TYPE_CUSTOM),
-			Some(ValueType::Binary)
-		);
+		assert_eq!(input_type_for(ofx::TYPE_BYTES), Some(ValueType::Binary));
+		assert_eq!(input_type_for(ofx::TYPE_CUSTOM), Some(ValueType::Binary));
 		assert_eq!(
 			input_type_for(ofx::TYPE_PUSHBUTTON),
 			Some(ValueType::PushButton)
@@ -1186,7 +1201,10 @@ mod tests {
 			let inst = instance_from_id(instance).expect("registered");
 			let props = &inst.value.plugin.descriptor.props;
 			props.with_locked(|all| {
-				for p in all.iter().filter(|p| p.name.contains("GL") || p.name.contains("OpenGL")) {
+				for p in all
+					.iter()
+					.filter(|p| p.name.contains("GL") || p.name.contains("OpenGL"))
+				{
 					eprintln!("[probe] desc prop {} = {:?}", p.name, p.values);
 				}
 			});
@@ -1225,17 +1243,21 @@ mod tests {
 			px[i] = f32::from_le_bytes(out_frame.data[i * 4..i * 4 + 4].try_into().unwrap());
 		}
 		eprintln!("[smoke] {identifier} first pixel out = {px:?}");
-		assert_ne!(px, [1.0, 0.0, 1.0, 1.0], "must not be the purple failure frame");
+		assert_ne!(
+			px,
+			[1.0, 0.0, 1.0, 1.0],
+			"must not be the purple failure frame"
+		);
 		assert_ne!(px, [0.0, 0.0, 0.0, 0.0], "must not be a black empty frame");
 	}
 
 	/// 构造一个只含 push-button 参数的最小实例（直接登记进注册表）。
 	fn instance_with_push_button() -> u64 {
-        use crate::descriptor::EffectDescriptor;
-        use crate::handle::RefBox;
-        use crate::host::Plugin;
-        use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
-        use std::sync::atomic::AtomicU32;
+		use crate::descriptor::EffectDescriptor;
+		use crate::handle::RefBox;
+		use crate::host::Plugin;
+		use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
+		use std::sync::atomic::AtomicU32;
 
 		let plugin = Arc::new(Plugin {
 			identifier: "test.plugin".into(),
@@ -1249,14 +1271,18 @@ mod tests {
 			unloaded: std::sync::atomic::AtomicBool::new(false),
 		});
 		let mut params = ParamSetInstance { params: Vec::new() };
-		params.params.push(Box::new(ParamInstance::from_def(ParamDef::new(
-			"button",
-			ofx::TYPE_PUSHBUTTON,
-		))));
-		params.params.push(Box::new(ParamInstance::from_def(ParamDef::new(
-			"gain",
-			ofx::TYPE_DOUBLE,
-		))));
+		params
+			.params
+			.push(Box::new(ParamInstance::from_def(ParamDef::new(
+				"button",
+				ofx::TYPE_PUSHBUTTON,
+			))));
+		params
+			.params
+			.push(Box::new(ParamInstance::from_def(ParamDef::new(
+				"gain",
+				ofx::TYPE_DOUBLE,
+			))));
 		let inst = crate::instance::Instance {
 			props: crate::property::PropertySet::new(),
 			plugin,
@@ -1293,22 +1319,28 @@ mod tests {
 		assert!(!push_button_clicked(id, "nope"));
 		assert!(!push_button_clicked(u64::MAX, "button"));
 		// 只 "button" 那次按下进了插件 entry，且 reason 是 UserEdited。
-		let calls = PUSH_ENTRY_CALLS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-		assert_eq!(calls, vec!["OfxActionInstanceChanged", "OfxChangeUserEdited"]);
+		let calls = PUSH_ENTRY_CALLS
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.clone();
+		assert_eq!(
+			calls,
+			vec!["OfxActionInstanceChanged", "OfxChangeUserEdited"]
+		);
 		unregister_instance(id);
 	}
 
 	/// 构造一个带 parametric 参数（维度 2、自定义 range、双维 UI 颜色
 	/// 已配置）与一个 String 参数的实例（直接登记进注册表）。
 	fn instance_with_parametric() -> u64 {
-        use crate::descriptor::EffectDescriptor;
-        use crate::handle::RefBox;
-        use crate::host::Plugin;
-        use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
-        use std::ffi::{c_char, c_void};
-        use std::sync::atomic::AtomicU32;
+		use crate::descriptor::EffectDescriptor;
+		use crate::handle::RefBox;
+		use crate::host::Plugin;
+		use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
+		use std::ffi::{c_char, c_void};
+		use std::sync::atomic::AtomicU32;
 
-        unsafe extern "C" fn dummy_entry(
+		unsafe extern "C" fn dummy_entry(
 			_: *const c_char,
 			_: *const c_void,
 			_: *mut c_void,
@@ -1317,8 +1349,10 @@ mod tests {
 			0
 		}
 		let def = ParamDef::new("curve", ofx::TYPE_PARAMETRIC);
-		def.props
-			.set_one(ofx::PROP_LABEL, PropValue::String(CString::new("Curve").unwrap()));
+		def.props.set_one(
+			ofx::PROP_LABEL,
+			PropValue::String(CString::new("Curve").unwrap()),
+		);
 		def.props
 			.set_one(ofx::P_PARAMETRIC_DIMENSION, PropValue::Int(2));
 		def.props.define(
@@ -1337,12 +1371,13 @@ mod tests {
 			],
 		);
 		let mut params = ParamSetInstance { params: Vec::new() };
+		params.params.push(Box::new(ParamInstance::from_def(def)));
 		params
 			.params
-			.push(Box::new(ParamInstance::from_def(def)));
-		params.params.push(Box::new(ParamInstance::from_def(
-			ParamDef::new("title", ofx::TYPE_STRING),
-		)));
+			.push(Box::new(ParamInstance::from_def(ParamDef::new(
+				"title",
+				ofx::TYPE_STRING,
+			))));
 		let plugin = Arc::new(Plugin {
 			identifier: "test.parametric".into(),
 			version: (1, 0),
@@ -1392,9 +1427,8 @@ mod tests {
 		// 默认值 = def.default 曲线集的 JSON（type_default 产出 1 条
 		// 恒等曲线；dimension 属性只做索引门控，未配置曲线按恒等读，
 		// 不扩充默认值）。
-		let expected = crate::param_curve::curves_to_json(&[crate::param_curve::Curve::identity(
-			0.0, 1.0,
-		)]);
+		let expected =
+			crate::param_curve::curves_to_json(&[crate::param_curve::Curve::identity(0.0, 1.0)]);
 		assert_eq!(
 			text_of(&input.default).as_deref(),
 			Some(expected.as_str()),
@@ -1415,10 +1449,7 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(props("parametric_dimension"), vec![NodeValue::Int(2)]);
-		assert_eq!(
-			props("parametric_range"),
-			vec![NodeValue::Vec2([0.0, 1.0])]
-		);
+		assert_eq!(props("parametric_range"), vec![NodeValue::Vec2([0.0, 1.0])]);
 		// 双维 → 两条颜色（重复键）。
 		assert_eq!(
 			props("parametric_ui_colour"),
@@ -1440,8 +1471,8 @@ mod tests {
 		// 有效 JSON（双维，第二维单点）→ 曲线写回，求值即实例曲线。
 		let json = r#"{"curves":[[{"key":0,"value":0,"slope":1},{"key":0.5,"value":0.7,"slope":1}],[{"key":0,"value":0,"slope":1}]]}"#;
 		set_text_param(&inst.value, "curve", json);
-		let curves = curves_of(inst.value.params.find("curve").unwrap().get())
-			.expect("应写回 Parametric");
+		let curves =
+			curves_of(inst.value.params.find("curve").unwrap().get()).expect("应写回 Parametric");
 		assert_eq!(curves[0].evaluate(0.5), 0.7);
 		assert_eq!(curves[1].len(), 1);
 		// 非 Parametric 值走 None 臂（helper 自身两臂都有执行）。
@@ -1531,8 +1562,10 @@ mod tests {
 
 		for kind in [ofx::TYPE_STRING, ofx::TYPE_STRCHOICE] {
 			let def = def_of(kind);
-			def.props
-				.set_one(ofx::P_DEFAULT, PropValue::String(CString::new("hi").unwrap()));
+			def.props.set_one(
+				ofx::P_DEFAULT,
+				PropValue::String(CString::new("hi").unwrap()),
+			);
 			assert!(matches!(
 				default_value_for_param(&def),
 				Some(NodeValue::Text(ref t)) if t == "hi"
@@ -1541,15 +1574,19 @@ mod tests {
 
 		// CUSTOM keeps the raw bytes; BYTES is always empty.
 		let def = def_of(ofx::TYPE_CUSTOM);
-		def.props
-			.set_one(ofx::P_DEFAULT, PropValue::String(CString::new("raw").unwrap()));
+		def.props.set_one(
+			ofx::P_DEFAULT,
+			PropValue::String(CString::new("raw").unwrap()),
+		);
 		assert!(matches!(
 			default_value_for_param(&def),
 			Some(NodeValue::Binary(ref b)) if b == b"raw"
 		));
 		let def = def_of(ofx::TYPE_BYTES);
-		def.props
-			.set_one(ofx::P_DEFAULT, PropValue::String(CString::new("ignored").unwrap()));
+		def.props.set_one(
+			ofx::P_DEFAULT,
+			PropValue::String(CString::new("ignored").unwrap()),
+		);
 		assert!(matches!(
 			default_value_for_param(&def),
 			Some(NodeValue::Binary(ref b)) if b.is_empty()
@@ -1606,10 +1643,8 @@ mod tests {
 		));
 
 		let def = def_of(ofx::TYPE_INTEGER2D);
-		def.props.define(
-			ofx::P_DEFAULT,
-			vec![PropValue::Int(1), PropValue::Int(2)],
-		);
+		def.props
+			.define(ofx::P_DEFAULT, vec![PropValue::Int(1), PropValue::Int(2)]);
 		assert!(matches!(
 			default_value_for_param(&def),
 			Some(NodeValue::Vec2(v)) if v == [1.0, 2.0]
@@ -1794,7 +1829,8 @@ mod tests {
 		let empty = HashMap::new();
 		// 规则 4：默认值全相等 → scalar。
 		let def = def_of(ofx::TYPE_RGB);
-		def.props.define(ofx::P_DEFAULT, vec![PropValue::Double(0.5); 3]);
+		def.props
+			.define(ofx::P_DEFAULT, vec![PropValue::Double(0.5); 3]);
 		assert_eq!(deduce_color_semantic(&def, &empty), "scalar");
 
 		// 规则 4 不等 + 无 parent → 兜底 color。
@@ -1825,8 +1861,7 @@ mod tests {
 				PropValue::Double(0.3),
 			],
 		);
-		def.props
-			.set_one(ofx::P_PARENT, text("gamma_group"));
+		def.props.set_one(ofx::P_PARENT, text("gamma_group"));
 		assert_eq!(deduce_color_semantic(&def, &empty), "scalar");
 
 		// 规则 5：parent 经 group 表解析出的 label 带关键词。
@@ -1867,13 +1902,9 @@ mod tests {
 			],
 		);
 		let p_double = ParamDef::new("p_double", ofx::TYPE_DOUBLE);
-		p_double
-			.props
-			.set_one(ofx::P_PARENT, text("grp_labeled"));
+		p_double.props.set_one(ofx::P_PARENT, text("grp_labeled"));
 		let p_orphan = ParamDef::new("p_orphan", ofx::TYPE_DOUBLE);
-		p_orphan
-			.props
-			.set_one(ofx::P_PARENT, text("missing_group"));
+		p_orphan.props.set_one(ofx::P_PARENT, text("missing_group"));
 		let empty_name = ParamDef::new("", ofx::TYPE_DOUBLE);
 		let bogus = ParamDef::new("bogus", "OfxParamTypeBogus");
 
@@ -1983,11 +2014,7 @@ mod tests {
 			.define(ofx::P_CHOICE_ENUM, vec![text("a"), text("b"), text("c")]);
 		mode.props.define(
 			ofx::P_CHOICE_ORDER,
-			vec![
-				PropValue::Int(2),
-				PropValue::Int(0),
-				PropValue::Int(1),
-			],
+			vec![PropValue::Int(2), PropValue::Int(0), PropValue::Int(1)],
 		);
 
 		let labels_only = ParamDef::new("labels_only", ofx::TYPE_CHOICE);
@@ -2025,14 +2052,8 @@ mod tests {
 			prop_values(tint, "color_semantic"),
 			vec![NodeValue::Text("color".into())]
 		);
-		assert_eq!(
-			prop_values(tint, "min"),
-			vec![NodeValue::Float(0.0)]
-		);
-		assert_eq!(
-			prop_values(tint, "max"),
-			vec![NodeValue::Float(1.0)]
-		);
+		assert_eq!(prop_values(tint, "min"), vec![NodeValue::Float(0.0)]);
+		assert_eq!(prop_values(tint, "max"), vec![NodeValue::Float(1.0)]);
 		assert_eq!(
 			prop_values(tint, "tooltip"),
 			vec![NodeValue::Text("Pick me".into())]
@@ -2064,17 +2085,11 @@ mod tests {
 		let sc = core.get_input("sc").unwrap();
 		assert_eq!(
 			prop_values(sc, "combo_option"),
-			vec![
-				NodeValue::Text("v1".into()),
-				NodeValue::Text("v2".into()),
-			]
+			vec![NodeValue::Text("v1".into()), NodeValue::Text("v2".into()),]
 		);
 		assert_eq!(
 			prop_values(sc, "combo_value"),
-			vec![
-				NodeValue::Text("v1".into()),
-				NodeValue::Text("v2".into()),
-			]
+			vec![NodeValue::Text("v1".into()), NodeValue::Text("v2".into()),]
 		);
 
 		let plain = core.get_input("plain_rgb").unwrap();
@@ -2297,7 +2312,10 @@ mod tests {
 		let inst = fake_instance("test.exec.branches", ok_entry, param_set(vec![]), vec![]);
 		let id = register_fake(inst);
 
-		fn plugin_spec(instance: u64, values: Vec<(String, NodeValue)>) -> quercus_render::eval::JobSpec {
+		fn plugin_spec(
+			instance: u64,
+			values: Vec<(String, NodeValue)>,
+		) -> quercus_render::eval::JobSpec {
 			quercus_render::eval::JobSpec::Plugin {
 				instance,
 				type_id: "org.quercus.test.exec".to_string(),
@@ -2350,9 +2368,12 @@ mod tests {
 		// 参数值分发：PushButton/None 跳过、数值走 POD、文本走 set_ofx；
 		// 后续 render_frame 的结果不做断言（假插件没有真实渲染行为），
 		// 这里只要求各分发分支被走到。
-		let frame =
-			quercus_render::eval::generate_frame(quercus_core::Rational::new(0, 1), (2, 2), quercus_core::PixelFormat::F32)
-				.expect("frame");
+		let frame = quercus_render::eval::generate_frame(
+			quercus_core::Rational::new(0, 1),
+			(2, 2),
+			quercus_core::PixelFormat::F32,
+		)
+		.expect("frame");
 		let spec = plugin_spec(
 			id,
 			vec![
@@ -2393,7 +2414,10 @@ mod tests {
 		} else {
 			"Linux-x86-64"
 		};
-		let dir = std::env::temp_dir().join(format!("quercus-ofx-plugin-unit-fixture-{}", std::process::id()));
+		let dir = std::env::temp_dir().join(format!(
+			"quercus-ofx-plugin-unit-fixture-{}",
+			std::process::id()
+		));
 		let bin_dir = dir
 			.join("quercus-test-plugin.ofx.bundle/Contents")
 			.join(platform);
@@ -2444,7 +2468,10 @@ mod tests {
 			return;
 		}
 		let inst = Host::global()
-			.create_instance("org.quercus.test-plugin", Some("OfxImageEffectContextFilter"))
+			.create_instance(
+				"org.quercus.test-plugin",
+				Some("OfxImageEffectContextFilter"),
+			)
 			.expect("测试插件实例");
 		let handle = PluginInstanceHandle(register_instance(inst));
 		let dup = duplicate_instance(handle).expect("duplicate 应成功");

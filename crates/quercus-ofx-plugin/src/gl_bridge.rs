@@ -226,6 +226,15 @@ pub fn set_viewport(w: i32, h: i32) {
 	imp::set_viewport(w, h);
 }
 
+/// Process-wide `glReadPixels` counter (tests prove the zero-copy path
+/// never calls it; the explicit fallback/readback path still does).
+static GL_READBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of `glReadPixels` calls made through this bridge.
+pub fn gl_readback_count() -> u64 {
+	GL_READBACKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 回读当前绑定 FBO 并装配成 F32 RGBA 图像（垂直翻转、U8 归一化）。
 /// 返回的 Image 与 CPU 路径输出格式一致，可直接交
 /// [`crate::render_driver::write_output_frame`]。
@@ -233,11 +242,16 @@ pub fn set_viewport(w: i32, h: i32) {
 /// # Safety
 ///
 /// 要求 GL 上下文已 current、目标 FBO 仍绑定。
-pub fn read_pixels_to_image(w: i32, h: i32, params: &VideoParams) -> crate::error::Result<Arc<Image>> {
+pub fn read_pixels_to_image(
+	w: i32,
+	h: i32,
+	params: &VideoParams,
+) -> crate::error::Result<Arc<Image>> {
 	#[cfg(all(test, target_os = "macos"))]
 	if real_gl_gated() {
 		return Err(gl_gated_error());
 	}
+	GL_READBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	imp::read_pixels_to_image(w, h, params)
 }
 
@@ -370,7 +384,13 @@ mod imp {
 		fn glGenFramebuffers(n: i32, framebuffers: *mut u32);
 		fn glDeleteFramebuffers(n: i32, framebuffers: *const u32);
 		fn glBindFramebuffer(target: u32, framebuffer: u32);
-		fn glFramebufferTexture2D(target: u32, attachment: u32, textarget: u32, texture: u32, level: i32);
+		fn glFramebufferTexture2D(
+			target: u32,
+			attachment: u32,
+			textarget: u32,
+			texture: u32,
+			level: i32,
+		);
 		fn glCheckFramebufferStatus(target: u32) -> u32;
 		fn glViewport(x: i32, y: i32, width: i32, height: i32);
 		fn glClearColor(r: f32, g: f32, b: f32, a: f32);
@@ -472,7 +492,10 @@ mod imp {
 				CGLDestroyPixelFormat(pix);
 				return Err(format!("CGLCreateContext 失败：{st}"));
 			}
-			Ok(Arc::new(GlContext { ctx, pixel_format: pix }))
+			Ok(Arc::new(GlContext {
+				ctx,
+				pixel_format: pix,
+			}))
 		}
 	}
 
@@ -565,9 +588,7 @@ mod imp {
 		match params.format {
 			f if f == crate::render::PIXEL_FORMAT_F32 => Ok((GL_RGBA32F, GL_FLOAT, 4)),
 			f if f == crate::render::PIXEL_FORMAT_U8 => Ok((GL_RGBA8, GL_UNSIGNED_BYTE, 1)),
-			f => Err(err(&format!(
-				"目标帧格式 {f} 不支持 GL 输出（仅 F32/U8）"
-			))),
+			f => Err(err(&format!("目标帧格式 {f} 不支持 GL 输出（仅 F32/U8）"))),
 		}
 	}
 
@@ -717,7 +738,13 @@ mod imp {
 	}
 
 	/// 回读原始像素（紧凑、行优先、GL 原点左下）。
-	fn read_pixels(w: i32, h: i32, format: u32, type_: u32, bpc: usize) -> crate::error::Result<Vec<u8>> {
+	fn read_pixels(
+		w: i32,
+		h: i32,
+		format: u32,
+		type_: u32,
+		bpc: usize,
+	) -> crate::error::Result<Vec<u8>> {
 		let size = (w as usize) * (h as usize) * 4 * bpc;
 		let mut buf = vec![0u8; size];
 		unsafe {
@@ -811,9 +838,982 @@ mod imp {
 	}
 }
 
-/// 非 macOS：GL 桥 stub（Linux 预留 EGL、Windows 预留 WGL 的接线点；
+// ---- Linux：EGL + GL_EXT_memory_object_fd（真正 GPU 零拷贝） ----------
+
+/// A GL texture created from a Vulkan `OPAQUE_FD` memory object.
+///
+/// The GL memory object owns the duplicated fd; deleting the texture and
+/// the memory object releases both. `name` is the real texture name OFX
+/// plugins receive through `kOfxImageEffectPropOpenGLTextureIndex`.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct GlMemoryTexture {
+	/// Real GL texture name.
+	pub name: i32,
+	/// GL memory object name (deleted with the texture).
+	pub(crate) memory: u32,
+	/// Width in pixels.
+	pub width: i32,
+	/// Height in pixels.
+	pub height: i32,
+}
+
+/// Import a wgpu/Vulkan `OPAQUE_FD` allocation as a real GL texture.
+///
+/// # Safety
+///
+/// Requires the GL context to be current ([`GlGuard`] held). The returned
+/// texture must be destroyed via [`delete_memory_texture`] while a guard is
+/// still held.
+#[cfg(target_os = "linux")]
+pub fn import_memory_texture(
+	export: &quercus_core::backend::GlMemoryExport,
+	width: i32,
+	height: i32,
+	params: &VideoParams,
+) -> crate::error::Result<GlMemoryTexture> {
+	imp::import_memory_texture(export, width, height, params)
+}
+
+/// Destroy a zero-copy GL texture and its imported memory object.
+///
+/// # Safety
+///
+/// Requires the GL context to be current.
+#[cfg(target_os = "linux")]
+pub fn delete_memory_texture(texture: &GlMemoryTexture) {
+	imp::delete_memory_texture(texture);
+}
+
+/// Flush all GL commands (cross-API visibility boundary for the first
+/// zero-copy version; later replaced by external semaphores).
+pub fn gl_finish() {
+	#[cfg(target_os = "macos")]
+	{
+		// macOS has no zero-copy GL path yet; the CGL implementation does
+		// not expose glFinish. Nothing to do.
+	}
+	#[cfg(target_os = "linux")]
+	imp::gl_finish();
+}
+
+/// Issue a GL memory barrier covering texture reads/writes.
+pub fn gl_memory_barrier() {
+	#[cfg(target_os = "linux")]
+	imp::gl_memory_barrier();
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+	use super::*;
+	use crate::image::{BitDepth, Components};
+	use crate::instance::OfxRectD;
+	use libloading::Library;
+	use std::ffi::{c_char, c_void, CStr};
+	use std::os::fd::IntoRawFd;
+	use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+	const EGL_DEFAULT_DISPLAY: *mut c_void = std::ptr::null_mut();
+	const EGL_NO_CONTEXT: *mut c_void = std::ptr::null_mut();
+	const EGL_NO_SURFACE: *mut c_void = std::ptr::null_mut();
+	const EGL_TRUE: u32 = 1;
+	const EGL_PLATFORM_DEVICE_EXT: u32 = 0x313F;
+	const EGL_SURFACE_TYPE: i32 = 0x3033;
+	const EGL_PBUFFER_BIT: i32 = 0x0001;
+	const EGL_RENDERABLE_TYPE: i32 = 0x3040;
+	const EGL_OPENGL_BIT: i32 = 0x0008;
+	const EGL_RED_SIZE: i32 = 0x3024;
+	const EGL_GREEN_SIZE: i32 = 0x3023;
+	const EGL_BLUE_SIZE: i32 = 0x3022;
+	const EGL_ALPHA_SIZE: i32 = 0x3021;
+	const EGL_NONE: i32 = 0x3038;
+	const EGL_WIDTH: i32 = 0x3057;
+	const EGL_HEIGHT: i32 = 0x3056;
+	const EGL_OPENGL_API: u32 = 0x30A2;
+	const EGL_CONTEXT_MAJOR_VERSION: i32 = 0x3098;
+	const EGL_CONTEXT_MINOR_VERSION: i32 = 0x30FB;
+	const EGL_CONTEXT_OPENGL_PROFILE_MASK: i32 = 0x30FD;
+	const EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT: i32 = 0x00000001;
+	const EGL_VENDOR: i32 = 0x3053;
+	const EGL_VERSION: i32 = 0x3054;
+	const EGL_RENDERER_EXT: i32 = 0x335F;
+	const EGL_DRM_RENDER_NODE_FILE_EXT: i32 = 0x3377;
+
+	const GL_TEXTURE_2D: u32 = 0x0DE1;
+	const GL_RGBA: u32 = 0x1908;
+	const GL_UNSIGNED_BYTE: u32 = 0x1401;
+	const GL_FLOAT: u32 = 0x1406;
+	const GL_RGBA32F: u32 = 0x8814;
+	const GL_RGBA8: u32 = 0x8058;
+	const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
+	const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+	const GL_NEAREST: u32 = 0x2600;
+	const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+	const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+	const GL_CLAMP_TO_EDGE: u32 = 0x812F;
+	const GL_FRAMEBUFFER: u32 = 0x8D40;
+	const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+	const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+	const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+	const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+	const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
+	const GL_VERSION: u32 = 0x1F02;
+	const GL_NO_ERROR: u32 = 0;
+	const GL_TEXTURE_FETCH_BARRIER_BIT: u32 = 0x00000008;
+	const GL_SHADER_IMAGE_ACCESS_BARRIER_BIT: u32 = 0x00000020;
+	const GL_HANDLE_TYPE_OPAQUE_FD_EXT: u32 = 0x9586;
+
+	type EGLDisplay = *mut c_void;
+	type EGLConfig = *mut c_void;
+	type EGLContext = *mut c_void;
+	type EGLSurface = *mut c_void;
+	type EGLDeviceEXT = *mut c_void;
+	type EGLGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
+	type EGLGetDisplay = unsafe extern "C" fn(*mut c_void) -> EGLDisplay;
+	type EGLGetPlatformDisplay = unsafe extern "C" fn(u32, *mut c_void, *const i32) -> EGLDisplay;
+	type EGLQueryDevices = unsafe extern "C" fn(i32, *mut EGLDeviceEXT, *mut i32) -> u32;
+	type EGLQueryDeviceString = unsafe extern "C" fn(EGLDeviceEXT, i32) -> *const c_char;
+	type EGLInitialize = unsafe extern "C" fn(EGLDisplay, *mut i32, *mut i32) -> u32;
+	type EGLBindAPI = unsafe extern "C" fn(u32) -> u32;
+	type EGLChooseConfig =
+		unsafe extern "C" fn(EGLDisplay, *const i32, *mut EGLConfig, i32, *mut i32) -> u32;
+	type EGLCreateContext =
+		unsafe extern "C" fn(EGLDisplay, EGLConfig, EGLContext, *const i32) -> EGLContext;
+	type EGLCreatePbufferSurface =
+		unsafe extern "C" fn(EGLDisplay, EGLConfig, *const i32) -> EGLSurface;
+	type EGLMakeCurrent =
+		unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> u32;
+	type EGLDestroySurface = unsafe extern "C" fn(EGLDisplay, EGLSurface);
+	type EGLDestroyContext = unsafe extern "C" fn(EGLDisplay, EGLContext);
+	type EGLTerminate = unsafe extern "C" fn(EGLDisplay) -> u32;
+	type EGLQueryString = unsafe extern "C" fn(EGLDisplay, i32) -> *const c_char;
+	type EGLGetError = unsafe extern "C" fn() -> i32;
+
+	struct EglFns {
+		get_proc: EGLGetProcAddress,
+		get_display: EGLGetDisplay,
+		get_platform_display: Option<EGLGetPlatformDisplay>,
+		query_devices: Option<EGLQueryDevices>,
+		query_device_string: Option<EGLQueryDeviceString>,
+		initialize: EGLInitialize,
+		bind_api: EGLBindAPI,
+		choose_config: EGLChooseConfig,
+		create_context: EGLCreateContext,
+		create_pbuffer_surface: EGLCreatePbufferSurface,
+		make_current: EGLMakeCurrent,
+		destroy_surface: EGLDestroySurface,
+		destroy_context: EGLDestroyContext,
+		terminate: EGLTerminate,
+		query_string: EGLQueryString,
+		get_error: EGLGetError,
+	}
+
+	impl EglFns {
+		fn load(lib: &Library) -> Result<Self, String> {
+			unsafe {
+				let get_proc: EGLGetProcAddress = load_sym(lib, b"eglGetProcAddress\0")?;
+				Ok(Self {
+					get_proc,
+					get_display: load_sym(lib, b"eglGetDisplay\0")?,
+					get_platform_display: ext_sym(get_proc, b"eglGetPlatformDisplayEXT\0"),
+					query_devices: ext_sym(get_proc, b"eglQueryDevicesEXT\0"),
+					query_device_string: ext_sym(get_proc, b"eglQueryDeviceStringEXT\0"),
+					initialize: load_sym(lib, b"eglInitialize\0")?,
+					bind_api: load_sym(lib, b"eglBindAPI\0")?,
+					choose_config: load_sym(lib, b"eglChooseConfig\0")?,
+					create_context: load_sym(lib, b"eglCreateContext\0")?,
+					create_pbuffer_surface: load_sym(lib, b"eglCreatePbufferSurface\0")?,
+					make_current: load_sym(lib, b"eglMakeCurrent\0")?,
+					destroy_surface: load_sym(lib, b"eglDestroySurface\0")?,
+					destroy_context: load_sym(lib, b"eglDestroyContext\0")?,
+					terminate: load_sym(lib, b"eglTerminate\0")?,
+					query_string: load_sym(lib, b"eglQueryString\0")?,
+					get_error: load_sym(lib, b"eglGetError\0")?,
+				})
+			}
+		}
+	}
+
+	type GLGetString = unsafe extern "C" fn(u32) -> *const c_char;
+	type GLGenTextures = unsafe extern "C" fn(i32, *mut u32);
+	type GLDeleteTextures = unsafe extern "C" fn(i32, *const u32);
+	type GLBindTexture = unsafe extern "C" fn(u32, u32);
+	type GLTexParameteri = unsafe extern "C" fn(u32, u32, i32);
+	type GLTexImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+	type GLGenFramebuffers = unsafe extern "C" fn(i32, *mut u32);
+	type GLDeleteFramebuffers = unsafe extern "C" fn(i32, *const u32);
+	type GLBindFramebuffer = unsafe extern "C" fn(u32, u32);
+	type GLFramebufferTexture2D = unsafe extern "C" fn(u32, u32, u32, u32, i32);
+	type GLCheckFramebufferStatus = unsafe extern "C" fn(u32) -> u32;
+	type GLViewport = unsafe extern "C" fn(i32, i32, i32, i32);
+	type GLClearColor = unsafe extern "C" fn(f32, f32, f32, f32);
+	type GLClear = unsafe extern "C" fn(u32);
+	type GLReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut c_void);
+	type GLGetError = unsafe extern "C" fn() -> u32;
+	type GLFinish = unsafe extern "C" fn();
+	type GLMemoryBarrier = unsafe extern "C" fn(u32);
+	type GLPixelStorei = unsafe extern "C" fn(u32, i32);
+	type GLCreateMemoryObjects = unsafe extern "C" fn(i32, *mut u32);
+	type GLDeleteMemoryObjects = unsafe extern "C" fn(i32, *const u32);
+	type GLImportMemoryFd = unsafe extern "C" fn(u32, u64, u32, i32);
+	type GLTexStorageMem2D = unsafe extern "C" fn(u32, i32, u32, i32, i32, u32, u64);
+
+	type GLMemoryBarrierFn = GLMemoryBarrier;
+
+	struct GlFns {
+		get_string: GLGetString,
+		gen_textures: GLGenTextures,
+		delete_textures: GLDeleteTextures,
+		bind_texture: GLBindTexture,
+		tex_parameter_i: GLTexParameteri,
+		tex_image_2d: GLTexImage2D,
+		gen_framebuffers: GLGenFramebuffers,
+		delete_framebuffers: GLDeleteFramebuffers,
+		bind_framebuffer: GLBindFramebuffer,
+		framebuffer_texture_2d: GLFramebufferTexture2D,
+		check_framebuffer_status: GLCheckFramebufferStatus,
+		viewport: GLViewport,
+		clear_color: GLClearColor,
+		clear: GLClear,
+		read_pixels: GLReadPixels,
+		get_error: GLGetError,
+		finish: GLFinish,
+		memory_barrier: Option<GLMemoryBarrierFn>,
+		pixel_store_i: GLPixelStorei,
+	}
+
+	impl GlFns {
+		fn load(lib: &Library) -> Result<Self, String> {
+			unsafe {
+				Ok(Self {
+					get_string: load_sym(lib, b"glGetString\0")?,
+					gen_textures: load_sym(lib, b"glGenTextures\0")?,
+					delete_textures: load_sym(lib, b"glDeleteTextures\0")?,
+					bind_texture: load_sym(lib, b"glBindTexture\0")?,
+					tex_parameter_i: load_sym(lib, b"glTexParameteri\0")?,
+					tex_image_2d: load_sym(lib, b"glTexImage2D\0")?,
+					gen_framebuffers: load_sym(lib, b"glGenFramebuffers\0")?,
+					delete_framebuffers: load_sym(lib, b"glDeleteFramebuffers\0")?,
+					bind_framebuffer: load_sym(lib, b"glBindFramebuffer\0")?,
+					framebuffer_texture_2d: load_sym(lib, b"glFramebufferTexture2D\0")?,
+					check_framebuffer_status: load_sym(lib, b"glCheckFramebufferStatus\0")?,
+					viewport: load_sym(lib, b"glViewport\0")?,
+					clear_color: load_sym(lib, b"glClearColor\0")?,
+					clear: load_sym(lib, b"glClear\0")?,
+					read_pixels: load_sym(lib, b"glReadPixels\0")?,
+					get_error: load_sym(lib, b"glGetError\0")?,
+					finish: load_sym(lib, b"glFinish\0")?,
+					memory_barrier: ext_sym_from_lib(lib, b"glMemoryBarrier\0"),
+					pixel_store_i: load_sym(lib, b"glPixelStorei\0")?,
+				})
+			}
+		}
+	}
+
+	struct GlMemoryFns {
+		create: GLCreateMemoryObjects,
+		delete: GLDeleteMemoryObjects,
+		import: GLImportMemoryFd,
+		tex_storage: GLTexStorageMem2D,
+	}
+
+	impl GlMemoryFns {
+		fn load(egl: &EglFns) -> Option<Self> {
+			unsafe {
+				Some(Self {
+					create: ext_sym(egl.get_proc, b"glCreateMemoryObjectsEXT\0")?,
+					delete: ext_sym(egl.get_proc, b"glDeleteMemoryObjectsEXT\0")?,
+					import: ext_sym(egl.get_proc, b"glImportMemoryFdEXT\0")?,
+					tex_storage: ext_sym(egl.get_proc, b"glTexStorageMem2DEXT\0")?,
+				})
+			}
+		}
+	}
+
+	unsafe fn load_sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
+		let sym = unsafe { lib.get::<T>(name) }.map_err(|e| {
+			format!(
+				"{}: {e}",
+				String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
+			)
+		})?;
+		Ok(*sym)
+	}
+
+	unsafe fn ext_sym<T: Copy>(get_proc: EGLGetProcAddress, name: &[u8]) -> Option<T> {
+		let c = CStr::from_bytes_with_nul(name).ok()?;
+		let p = unsafe { get_proc(c.as_ptr()) };
+		if p.is_null() {
+			None
+		} else {
+			Some(unsafe { std::mem::transmute_copy(&p) })
+		}
+	}
+
+	unsafe fn ext_sym_from_lib<T: Copy>(lib: &Library, name: &[u8]) -> Option<T> {
+		unsafe { lib.get::<T>(name) }.ok().map(|s| *s)
+	}
+
+	fn cstr(p: *const c_char) -> String {
+		if p.is_null() {
+			String::new()
+		} else {
+			unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+		}
+	}
+
+	struct GlContext {
+		display: EGLDisplay,
+		context: EGLContext,
+		surface: EGLSurface,
+		egl: EglFns,
+		gl: GlFns,
+		memory: Option<GlMemoryFns>,
+		_egl_lib: Library,
+		_gl_lib: Library,
+	}
+
+	// SAFETY: the global GL_LOCK serializes every make-current/GL call;
+	// the pointers are only dereferenced by the thread holding the guard.
+	unsafe impl Send for GlContext {}
+	unsafe impl Sync for GlContext {}
+
+	impl GlContext {
+		fn drop_current(&self) {
+			unsafe {
+				(self.egl.make_current)(
+					self.display,
+					EGL_NO_SURFACE,
+					EGL_NO_SURFACE,
+					EGL_NO_CONTEXT,
+				);
+			}
+		}
+	}
+
+	impl Drop for GlContext {
+		fn drop(&mut self) {
+			unsafe {
+				(self.egl.make_current)(
+					self.display,
+					EGL_NO_SURFACE,
+					EGL_NO_SURFACE,
+					EGL_NO_CONTEXT,
+				);
+				if !self.surface.is_null() {
+					(self.egl.destroy_surface)(self.display, self.surface);
+				}
+				if !self.context.is_null() {
+					(self.egl.destroy_context)(self.display, self.context);
+				}
+				if !self.display.is_null() {
+					(self.egl.terminate)(self.display);
+				}
+			}
+		}
+	}
+
+	static GL_CONTEXT: OnceLock<Result<Arc<GlContext>, String>> = OnceLock::new();
+	static GL_LOCK: Mutex<()> = Mutex::new(());
+
+	fn lock() -> MutexGuard<'static, ()> {
+		GL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+	}
+
+	fn err(msg: &str) -> crate::error::Error {
+		crate::error::Error::Failed(format!("gl_bridge: {msg}"))
+	}
+
+	fn context() -> crate::error::Result<&'static Arc<GlContext>> {
+		match GL_CONTEXT.get_or_init(create_context) {
+			Ok(c) => Ok(c),
+			Err(e) => Err(err(e)),
+		}
+	}
+
+	fn pick_display(egl: &EglFns) -> Result<EGLDisplay, String> {
+		let mut first: Option<EGLDisplay> = None;
+		if let (Some(get_platform), Some(query_devices), Some(query_device_string)) = (
+			egl.get_platform_display,
+			egl.query_devices,
+			egl.query_device_string,
+		) {
+			let mut devices = [std::ptr::null_mut(); 8];
+			let mut count = 0i32;
+			let ok = unsafe { query_devices(8, devices.as_mut_ptr(), &mut count) };
+			if ok == EGL_TRUE {
+				for (i, dev) in devices.iter().copied().enumerate() {
+					if i >= count as usize {
+						break;
+					}
+					let dpy =
+						unsafe { get_platform(EGL_PLATFORM_DEVICE_EXT, dev, std::ptr::null()) };
+					if dpy.is_null() {
+						continue;
+					}
+					let mut major = 0i32;
+					let mut minor = 0i32;
+					if unsafe { (egl.initialize)(dpy, &mut major, &mut minor) } != EGL_TRUE {
+						continue;
+					}
+					let vendor = cstr(unsafe { (egl.query_string)(dpy, EGL_VENDOR) });
+					let renderer = cstr(unsafe { query_device_string(dev, EGL_RENDERER_EXT) });
+					let node =
+						cstr(unsafe { query_device_string(dev, EGL_DRM_RENDER_NODE_FILE_EXT) });
+					if std::env::var_os("QUERCUS_OFX_GL_TRACE").is_some() {
+						eprintln!("[ofx-gl] egl device {i}: vendor={vendor} renderer={renderer} node={node}");
+					}
+					if !renderer.to_ascii_lowercase().contains("llvmpipe")
+						&& !vendor.to_ascii_lowercase().contains("mesa")
+					{
+						return Ok(dpy);
+					}
+					if first.is_none() {
+						first = Some(dpy);
+					}
+				}
+			}
+		}
+		if let Some(dpy) = first {
+			return Ok(dpy);
+		}
+		let dpy = unsafe { (egl.get_display)(EGL_DEFAULT_DISPLAY) };
+		if dpy.is_null() {
+			return Err("eglGetDisplay(EGL_DEFAULT_DISPLAY) returned EGL_NO_DISPLAY".into());
+		}
+		let mut major = 0i32;
+		let mut minor = 0i32;
+		if unsafe { (egl.initialize)(dpy, &mut major, &mut minor) } != EGL_TRUE {
+			return Err(format!("eglInitialize(default) failed: 0x{:x}", unsafe {
+				(egl.get_error)()
+			}));
+		}
+		Ok(dpy)
+	}
+
+	fn create_context() -> Result<Arc<GlContext>, String> {
+		let egl_lib = unsafe { Library::new("libEGL.so.1") }
+			.or_else(|_| unsafe { Library::new("libEGL.so") })
+			.map_err(|e| format!("load libEGL: {e}"))?;
+		let gl_lib = unsafe { Library::new("libGL.so.1") }
+			.or_else(|_| unsafe { Library::new("libGL.so") })
+			.map_err(|e| format!("load libGL: {e}"))?;
+		let egl = EglFns::load(&egl_lib)?;
+		let gl = GlFns::load(&gl_lib)?;
+		let memory = GlMemoryFns::load(&egl);
+		let display = pick_display(&egl)?;
+		let vendor = cstr(unsafe { (egl.query_string)(display, EGL_VENDOR) });
+		let version = cstr(unsafe { (egl.query_string)(display, EGL_VERSION) });
+		if std::env::var_os("QUERCUS_OFX_GL_TRACE").is_some() {
+			eprintln!("[ofx-gl] EGL vendor={vendor} version={version}");
+		}
+
+		let config_attrs = [
+			EGL_SURFACE_TYPE,
+			EGL_PBUFFER_BIT,
+			EGL_RENDERABLE_TYPE,
+			EGL_OPENGL_BIT,
+			EGL_RED_SIZE,
+			8,
+			EGL_GREEN_SIZE,
+			8,
+			EGL_BLUE_SIZE,
+			8,
+			EGL_ALPHA_SIZE,
+			8,
+			EGL_NONE,
+		];
+		let mut config: EGLConfig = std::ptr::null_mut();
+		let mut n = 0i32;
+		if unsafe { (egl.choose_config)(display, config_attrs.as_ptr(), &mut config, 1, &mut n) }
+			!= EGL_TRUE
+			|| n == 0
+		{
+			unsafe { (egl.terminate)(display) };
+			return Err("eglChooseConfig(pbuffer, OpenGL) failed".into());
+		}
+		if unsafe { (egl.bind_api)(EGL_OPENGL_API) } != EGL_TRUE {
+			unsafe { (egl.terminate)(display) };
+			return Err("eglBindAPI(OpenGL) failed".into());
+		}
+		let context_attrs = [
+			EGL_CONTEXT_MAJOR_VERSION,
+			3,
+			EGL_CONTEXT_MINOR_VERSION,
+			2,
+			EGL_CONTEXT_OPENGL_PROFILE_MASK,
+			EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+			EGL_NONE,
+		];
+		let context = unsafe {
+			(egl.create_context)(display, config, EGL_NO_CONTEXT, context_attrs.as_ptr())
+		};
+		if context.is_null() {
+			unsafe { (egl.terminate)(display) };
+			return Err(format!("eglCreateContext failed: 0x{:x}", unsafe {
+				(egl.get_error)()
+			}));
+		}
+		let pbuffer_attrs = [EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE];
+		let surface =
+			unsafe { (egl.create_pbuffer_surface)(display, config, pbuffer_attrs.as_ptr()) };
+		if surface.is_null() {
+			unsafe {
+				(egl.destroy_context)(display, context);
+				(egl.terminate)(display);
+			}
+			return Err(format!("eglCreatePbufferSurface failed: 0x{:x}", unsafe {
+				(egl.get_error)()
+			}));
+		}
+		if unsafe { (egl.make_current)(display, surface, surface, context) } != EGL_TRUE {
+			unsafe {
+				(egl.destroy_surface)(display, surface);
+				(egl.destroy_context)(display, context);
+				(egl.terminate)(display);
+			}
+			return Err(format!("eglMakeCurrent failed: 0x{:x}", unsafe {
+				(egl.get_error)()
+			}));
+		}
+		let gl_version = cstr(unsafe { (gl.get_string)(GL_VERSION) });
+		if gl_version.is_empty() {
+			unsafe {
+				(egl.make_current)(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+				(egl.destroy_surface)(display, surface);
+				(egl.destroy_context)(display, context);
+				(egl.terminate)(display);
+			}
+			return Err("glGetString(GL_VERSION) returned null".into());
+		}
+		if std::env::var_os("QUERCUS_OFX_GL_TRACE").is_some() {
+			eprintln!("[ofx-gl] GL_VERSION={gl_version}");
+		}
+		Ok(Arc::new(GlContext {
+			display,
+			context,
+			surface,
+			egl,
+			gl,
+			memory,
+			_egl_lib: egl_lib,
+			_gl_lib: gl_lib,
+		}))
+	}
+
+	pub struct GuardInner {
+		_lock: Option<MutexGuard<'static, ()>>,
+		_ctx: Arc<GlContext>,
+	}
+
+	thread_local! {
+		static ACQUIRE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+	}
+
+	pub fn is_current() -> bool {
+		ACQUIRE_DEPTH.with(|d| d.get() > 0)
+	}
+
+	pub fn acquire() -> crate::error::Result<GlGuard> {
+		let ctx = context()?.clone();
+		let depth = ACQUIRE_DEPTH.with(|d| d.get());
+		if depth > 0 {
+			ACQUIRE_DEPTH.with(|d| d.set(depth + 1));
+			return Ok(GlGuard {
+				_inner: GuardInner {
+					_lock: None,
+					_ctx: ctx,
+				},
+			});
+		}
+		let guard = lock();
+		let ok =
+			unsafe { (ctx.egl.make_current)(ctx.display, ctx.surface, ctx.surface, ctx.context) };
+		if ok != EGL_TRUE {
+			drop(guard);
+			return Err(err(&format!("eglMakeCurrent failed: 0x{:x}", unsafe {
+				(ctx.egl.get_error)()
+			})));
+		}
+		ACQUIRE_DEPTH.with(|d| d.set(1));
+		Ok(GlGuard {
+			_inner: GuardInner {
+				_lock: Some(guard),
+				_ctx: ctx,
+			},
+		})
+	}
+
+	impl Drop for GuardInner {
+		fn drop(&mut self) {
+			let depth = ACQUIRE_DEPTH.with(|d| d.get());
+			if depth <= 1 {
+				ACQUIRE_DEPTH.with(|d| d.set(0));
+				self._ctx.drop_current();
+				drop(self._lock.take());
+			} else {
+				ACQUIRE_DEPTH.with(|d| d.set(depth - 1));
+			}
+		}
+	}
+
+	pub fn gl_available() -> bool {
+		context().is_ok()
+	}
+
+	fn check_error(what: &str) -> crate::error::Result<()> {
+		let ctx = context()?;
+		let e = unsafe { (ctx.gl.get_error)() };
+		if e != GL_NO_ERROR {
+			Err(err(&format!("{what} failed: GL error 0x{e:x}")))
+		} else {
+			Ok(())
+		}
+	}
+
+	fn gl_texture_format(params: &VideoParams) -> crate::error::Result<(u32, u32, usize)> {
+		match params.format {
+			f if f == crate::render::PIXEL_FORMAT_F32 => Ok((GL_RGBA32F, GL_FLOAT, 4)),
+			f if f == crate::render::PIXEL_FORMAT_U8 => Ok((GL_RGBA8, GL_UNSIGNED_BYTE, 1)),
+			f => Err(err(&format!(
+				"target format {f} unsupported for GL (F32/U8 only)"
+			))),
+		}
+	}
+
+	fn set_texture_params(ctx: &GlContext, name: u32) {
+		unsafe {
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST as i32);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST as i32);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+		}
+	}
+
+	pub fn create_output_texture(
+		w: i32,
+		h: i32,
+		params: &VideoParams,
+	) -> crate::error::Result<i32> {
+		let ctx = context()?;
+		if w <= 0 || h <= 0 {
+			return Err(err("invalid texture size"));
+		}
+		let (internal, upload_type, _) = gl_texture_format(params)?;
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut name = 0u32;
+		unsafe {
+			(ctx.gl.gen_textures)(1, &mut name);
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(ctx.gl.tex_image_2d)(
+				GL_TEXTURE_2D,
+				0,
+				internal as i32,
+				w,
+				h,
+				0,
+				GL_RGBA,
+				upload_type,
+				std::ptr::null(),
+			);
+		}
+		set_texture_params(ctx, name);
+		check_error("create_output_texture")?;
+		Ok(name as i32)
+	}
+
+	pub fn create_input_texture(w: i32, h: i32, pixels: &[u8]) -> crate::error::Result<i32> {
+		let ctx = context()?;
+		if w <= 0 || h <= 0 || pixels.len() < (w as usize * h as usize * 16) {
+			return Err(err("invalid input texture size/data"));
+		}
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut name = 0u32;
+		unsafe {
+			(ctx.gl.pixel_store_i)(GL_UNPACK_ALIGNMENT, 1);
+			(ctx.gl.gen_textures)(1, &mut name);
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(ctx.gl.tex_image_2d)(
+				GL_TEXTURE_2D,
+				0,
+				GL_RGBA32F as i32,
+				w,
+				h,
+				0,
+				GL_RGBA,
+				GL_FLOAT,
+				pixels.as_ptr().cast(),
+			);
+		}
+		set_texture_params(ctx, name);
+		check_error("create_input_texture")?;
+		Ok(name as i32)
+	}
+
+	pub fn delete_gl_texture(name: i32) {
+		if name <= 0 {
+			return;
+		}
+		if let Ok(ctx) = context() {
+			let name = name as u32;
+			unsafe {
+				(ctx.gl.delete_textures)(1, &name);
+			}
+		}
+	}
+
+	pub fn import_memory_texture(
+		export: &quercus_core::backend::GlMemoryExport,
+		w: i32,
+		h: i32,
+		params: &VideoParams,
+	) -> crate::error::Result<GlMemoryTexture> {
+		if !is_current() {
+			return Err(err("import_memory_texture requires a current GL context"));
+		}
+		let ctx = context()?;
+		let memory_fns = ctx
+			.memory
+			.as_ref()
+			.ok_or_else(|| err("GL_EXT_memory_object_fd is not available"))?;
+		let (internal, _, _) = gl_texture_format(params)?;
+		if (w as u32) != export.width() || (h as u32) != export.height() {
+			return Err(err("exported texture size mismatch"));
+		}
+		let fd = export
+			.try_clone_fd()
+			.map_err(|e| err(&format!("dup exported fd: {e}")))?;
+		let raw_fd = fd.into_raw_fd();
+		let mut memory = 0u32;
+		unsafe {
+			(memory_fns.create)(1, &mut memory);
+			let _ = (ctx.gl.get_error)();
+			(memory_fns.import)(memory, export.size(), GL_HANDLE_TYPE_OPAQUE_FD_EXT, raw_fd);
+		}
+		let import_err = unsafe { (ctx.gl.get_error)() };
+		if import_err != GL_NO_ERROR {
+			unsafe {
+				libc::close(raw_fd);
+				(memory_fns.delete)(1, &memory);
+			}
+			return Err(err(&format!(
+				"glImportMemoryFdEXT failed: 0x{import_err:x}"
+			)));
+		}
+		let mut name = 0u32;
+		unsafe {
+			(ctx.gl.gen_textures)(1, &mut name);
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(memory_fns.tex_storage)(GL_TEXTURE_2D, 1, internal, w, h, memory, 0);
+		}
+		set_texture_params(ctx, name);
+		if let Err(e) = check_error("glTexStorageMem2DEXT") {
+			unsafe {
+				(ctx.gl.delete_textures)(1, &name);
+				(memory_fns.delete)(1, &memory);
+			}
+			return Err(e);
+		}
+		Ok(GlMemoryTexture {
+			name: name as i32,
+			memory,
+			width: w,
+			height: h,
+		})
+	}
+
+	pub fn delete_memory_texture(texture: &GlMemoryTexture) {
+		if texture.name <= 0 {
+			return;
+		}
+		if let Ok(ctx) = context() {
+			let name = texture.name as u32;
+			unsafe {
+				(ctx.gl.delete_textures)(1, &name);
+				if let Some(m) = ctx.memory.as_ref() {
+					(m.delete)(1, &texture.memory);
+				}
+			}
+		}
+	}
+
+	pub fn create_fbo(tex: i32, w: i32, h: i32) -> crate::error::Result<i32> {
+		let ctx = context()?;
+		if tex <= 0 || w <= 0 || h <= 0 {
+			return Err(err("invalid FBO parameters"));
+		}
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut fbo = 0u32;
+		unsafe {
+			(ctx.gl.gen_framebuffers)(1, &mut fbo);
+			(ctx.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo);
+			(ctx.gl.framebuffer_texture_2d)(
+				GL_FRAMEBUFFER,
+				GL_COLOR_ATTACHMENT0,
+				GL_TEXTURE_2D,
+				tex as u32,
+				0,
+			);
+		}
+		let status = unsafe { (ctx.gl.check_framebuffer_status)(GL_FRAMEBUFFER) };
+		if status != GL_FRAMEBUFFER_COMPLETE {
+			unsafe {
+				(ctx.gl.delete_framebuffers)(1, &fbo);
+			}
+			return Err(err(&format!("FBO incomplete: 0x{status:x}")));
+		}
+		Ok(fbo as i32)
+	}
+
+	pub fn bind_fbo(fbo: i32) {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo.max(0) as u32);
+			}
+		}
+	}
+
+	pub fn delete_fbo(fbo: i32) {
+		if fbo <= 0 {
+			return;
+		}
+		if let Ok(ctx) = context() {
+			let fbo = fbo as u32;
+			unsafe {
+				(ctx.gl.delete_framebuffers)(1, &fbo);
+			}
+		}
+	}
+
+	pub fn set_viewport(w: i32, h: i32) {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.viewport)(0, 0, w, h);
+			}
+		}
+	}
+
+	pub fn read_pixels_to_image(
+		w: i32,
+		h: i32,
+		params: &VideoParams,
+	) -> crate::error::Result<Arc<crate::image::Image>> {
+		let ctx = context()?;
+		let (_, read_type, bpc) = gl_texture_format(params)?;
+		if w <= 0 || h <= 0 {
+			return Err(err("invalid readback size"));
+		}
+		let count = (w as usize)
+			.saturating_mul(h as usize)
+			.saturating_mul(4)
+			.saturating_mul(bpc);
+		let mut raw = vec![0u8; count];
+		unsafe {
+			(ctx.gl.pixel_store_i)(GL_PACK_ALIGNMENT, 1);
+			(ctx.gl.read_pixels)(0, 0, w, h, GL_RGBA, read_type, raw.as_mut_ptr().cast());
+		}
+		check_error("glReadPixels")?;
+		let mut img = crate::image::Image::allocate(
+			BitDepth::Float,
+			Components::Rgba,
+			OfxRectD {
+				x1: 0.0,
+				y1: 0.0,
+				x2: w as f64,
+				y2: h as f64,
+			},
+		);
+		let dst = img.pixels_mut();
+		let src_row = w as usize * 4 * bpc;
+		let dst_row = w as usize * 16;
+		for y in 0..h as usize {
+			let src_y = h as usize - 1 - y;
+			let src = &raw[src_y * src_row..(src_y + 1) * src_row];
+			let d = &mut dst[y * dst_row..(y + 1) * dst_row];
+			for x in 0..w as usize {
+				let (r, g, b, a) = if bpc == 4 {
+					let p = &src[x * 16..x * 16 + 16];
+					(
+						f32::from_ne_bytes(p[0..4].try_into().unwrap()),
+						f32::from_ne_bytes(p[4..8].try_into().unwrap()),
+						f32::from_ne_bytes(p[8..12].try_into().unwrap()),
+						f32::from_ne_bytes(p[12..16].try_into().unwrap()),
+					)
+				} else {
+					let p = &src[x * 4..x * 4 + 4];
+					(
+						p[0] as f32 / 255.0,
+						p[1] as f32 / 255.0,
+						p[2] as f32 / 255.0,
+						p[3] as f32 / 255.0,
+					)
+				};
+				let o = x * 16;
+				d[o..o + 4].copy_from_slice(&r.to_ne_bytes());
+				d[o + 4..o + 8].copy_from_slice(&g.to_ne_bytes());
+				d[o + 8..o + 12].copy_from_slice(&b.to_ne_bytes());
+				d[o + 12..o + 16].copy_from_slice(&a.to_ne_bytes());
+			}
+		}
+		Ok(Arc::new(img))
+	}
+
+	pub fn gl_clear_color(r: f32, g: f32, b: f32, a: f32) {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.clear_color)(r, g, b, a);
+			}
+		}
+	}
+
+	pub fn gl_clear() {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.clear)(GL_COLOR_BUFFER_BIT);
+			}
+		}
+	}
+
+	pub fn gl_finish() {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.finish)();
+			}
+		}
+	}
+
+	pub fn gl_memory_barrier() {
+		if let Ok(ctx) = context() {
+			if let Some(barrier) = ctx.gl.memory_barrier {
+				unsafe {
+					barrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+				}
+			}
+		}
+	}
+
+	pub fn gl_version_string() -> Option<String> {
+		let ctx = context().ok()?;
+		let p = unsafe { (ctx.gl.get_string)(GL_VERSION) };
+		if p.is_null() {
+			None
+		} else {
+			Some(cstr(p))
+		}
+	}
+}
+
+/// 非 macOS/Linux：GL 桥 stub（Windows 预留 WGL 的接线点；
+
 /// 全部失败/false，use_opengl 决策回退 CPU）。
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
 	use super::*;
 
@@ -832,21 +1832,29 @@ mod imp {
 	}
 
 	pub fn acquire() -> crate::error::Result<GlGuard> {
-		Err(crate::error::Error::Failed("gl_bridge: 平台无 GL 实现（Linux/Windows stub）".into()))
+		Err(crate::error::Error::Failed(
+			"gl_bridge: 平台无 GL 实现（Linux/Windows stub）".into(),
+		))
 	}
 
 	pub fn create_output_texture(_w: i32, _h: i32, _p: &VideoParams) -> crate::error::Result<i32> {
-		Err(crate::error::Error::Failed("gl_bridge: 平台无 GL 实现".into()))
+		Err(crate::error::Error::Failed(
+			"gl_bridge: 平台无 GL 实现".into(),
+		))
 	}
 
 	pub fn create_input_texture(_w: i32, _h: i32, _p: &[u8]) -> crate::error::Result<i32> {
-		Err(crate::error::Error::Failed("gl_bridge: 平台无 GL 实现".into()))
+		Err(crate::error::Error::Failed(
+			"gl_bridge: 平台无 GL 实现".into(),
+		))
 	}
 
 	pub fn delete_gl_texture(_name: i32) {}
 
 	pub fn create_fbo(_tex: i32, _w: i32, _h: i32) -> crate::error::Result<i32> {
-		Err(crate::error::Error::Failed("gl_bridge: 平台无 GL 实现".into()))
+		Err(crate::error::Error::Failed(
+			"gl_bridge: 平台无 GL 实现".into(),
+		))
 	}
 
 	pub fn bind_fbo(_fbo: i32) {}
@@ -860,7 +1868,9 @@ mod imp {
 		_h: i32,
 		_p: &VideoParams,
 	) -> crate::error::Result<Arc<Image>> {
-		Err(crate::error::Error::Failed("gl_bridge: 平台无 GL 实现".into()))
+		Err(crate::error::Error::Failed(
+			"gl_bridge: 平台无 GL 实现".into(),
+		))
 	}
 
 	pub fn gl_clear_color(_r: f32, _g: f32, _b: f32, _a: f32) {}
@@ -972,7 +1982,10 @@ mod tests {
 		assert_eq!(img.bounds().x2, w as f64);
 		assert_eq!(img.bounds().y2, h as f64);
 		let px = &img.pixels()[0..16];
-		let px_f: Vec<f32> = px.chunks_exact(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect();
+		let px_f: Vec<f32> = px
+			.chunks_exact(4)
+			.map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+			.collect();
 		assert!((px_f[0] - 0.1).abs() < 1e-6, "R={}", px_f[0]);
 		assert!((px_f[1] - 0.2).abs() < 1e-6, "G={}", px_f[1]);
 		assert!((px_f[2] - 0.3).abs() < 1e-6, "B={}", px_f[2]);
@@ -982,7 +1995,10 @@ mod tests {
 			.chunks_exact(4)
 			.map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
 			.collect();
-		assert!(all.chunks(4).all(|px| (px[0] - 0.1).abs() < 1e-6), "整帧应为清屏色");
+		assert!(
+			all.chunks(4).all(|px| (px[0] - 0.1).abs() < 1e-6),
+			"整帧应为清屏色"
+		);
 	}
 
 	/// U8 目标：clear → GL_RGBA8 存储 → 回读归一化为 F32（容差内）。
@@ -1054,6 +2070,125 @@ mod tests {
 				"pixel {i}: got {g} want {expected}"
 			);
 		}
+	}
+
+	/// Linux 真正 GPU 零拷贝：wgpu/Vulkan 导出的 `OPAQUE_FD` 被 GL
+	/// 导入为同一块显存，插件写 GL 纹理后 Vulkan/wgpu 侧仍可用。
+	///
+	/// 本用例只验证导入/渲染/回读；回读是测试断言，不属于生产路径。
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn import_opaque_fd_texture_roundtrip() {
+		if std::env::var_os("QUERCUS_GPU_TESTS").is_none() {
+			println!("SKIP: 零拷贝 GL 用例需 QUERCUS_GPU_TESTS");
+			return;
+		}
+		let Some(ctx) = quercus_core::backend::gpu_or_skip("GL opaque-fd import") else {
+			return;
+		};
+		if !ctx.supports_gl_zerocopy() {
+			println!("SKIP: context 不支持 Vulkan OPAQUE_FD 导出");
+			return;
+		}
+		let _g = match acquire() {
+			Ok(g) => g,
+			Err(e) => {
+				println!("SKIP: GL 上下文不可用: {e}");
+				return;
+			}
+		};
+		let w = 32;
+		let h = 32;
+		let token = ctx.create_texture(w, h).expect("exportable texture");
+		ctx.clear_texture(token).expect("clear output");
+		ctx.wait_idle();
+		let export = ctx.export_gl_memory(token).expect("opaque fd export");
+		let params = f32_params(w, h);
+		let gl = import_memory_texture(&export, w, h, &params).expect("GL import");
+		let fbo = create_fbo(gl.name, w, h).expect("FBO");
+		bind_fbo(fbo);
+		set_viewport(w, h);
+		gl_clear_color(0.25, 0.5, 0.75, 1.0);
+		gl_clear();
+		gl_finish();
+		let img = read_pixels_to_image(w, h, &params).expect("readback");
+		let px: Vec<f32> = img.pixels()[0..16]
+			.chunks_exact(4)
+			.map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+			.collect();
+		assert!((px[0] - 0.25).abs() < 1e-3, "R={}", px[0]);
+		assert!((px[1] - 0.5).abs() < 1e-3, "G={}", px[1]);
+		assert!((px[2] - 0.75).abs() < 1e-3, "B={}", px[2]);
+		assert!((px[3] - 1.0).abs() < 1e-3, "A={}", px[3]);
+		delete_fbo(fbo);
+		delete_memory_texture(&gl);
+		// Cross-API visibility: the plugin's GL writes must be visible to
+		// wgpu/Vulkan through the same allocation.
+		ctx.wait_idle();
+		let frame = ctx.download(token).expect("vulkan download");
+		let vk_px: Vec<f32> = frame.data[0..16]
+			.chunks_exact(4)
+			.map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+			.collect();
+		assert!((vk_px[0] - 0.25).abs() < 1e-3, "Vulkan R={}", vk_px[0]);
+		assert!((vk_px[1] - 0.5).abs() < 1e-3, "Vulkan G={}", vk_px[1]);
+		assert!((vk_px[2] - 0.75).abs() < 1e-3, "Vulkan B={}", vk_px[2]);
+		ctx.destroy_texture(token);
+	}
+
+	/// 反方向：wgpu 上传的像素经同一 `OPAQUE_FD` 在 GL 中可见。
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn import_opaque_fd_reads_wgpu_content() {
+		if std::env::var_os("QUERCUS_GPU_TESTS").is_none() {
+			println!("SKIP: 零拷贝 GL 用例需 QUERCUS_GPU_TESTS");
+			return;
+		}
+		let Some(ctx) = quercus_core::backend::gpu_or_skip("GL opaque-fd read") else {
+			return;
+		};
+		if !ctx.supports_gl_zerocopy() {
+			println!("SKIP: context 不支持 Vulkan OPAQUE_FD 导出");
+			return;
+		}
+		let _g = match acquire() {
+			Ok(g) => g,
+			Err(e) => {
+				println!("SKIP: GL 上下文不可用: {e}");
+				return;
+			}
+		};
+		let (w, h) = (16, 16);
+		let token = ctx.create_texture(w, h).expect("texture");
+		let mut frame = crate::render::Frame::new();
+		frame.set_video_params(f32_params(w, h));
+		assert!(frame.allocate());
+		for px in frame.data.chunks_exact_mut(16) {
+			px[0..4].copy_from_slice(&0.2f32.to_le_bytes());
+			px[4..8].copy_from_slice(&0.4f32.to_le_bytes());
+			px[8..12].copy_from_slice(&0.6f32.to_le_bytes());
+			px[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+		}
+		ctx.upload(token, &frame).expect("upload");
+		ctx.wait_idle();
+		let export = ctx.export_gl_memory(token).expect("export");
+		let params = f32_params(w, h);
+		let gl = import_memory_texture(&export, w, h, &params).expect("GL import");
+		let fbo = create_fbo(gl.name, w, h).expect("FBO");
+		bind_fbo(fbo);
+		gl_memory_barrier();
+		gl_finish();
+		let img = read_pixels_to_image(w, h, &params).expect("readback");
+		let px: Vec<f32> = img.pixels()[0..16]
+			.chunks_exact(4)
+			.map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+			.collect();
+		assert!((px[0] - 0.2).abs() < 1e-4, "R={}", px[0]);
+		assert!((px[1] - 0.4).abs() < 1e-4, "G={}", px[1]);
+		assert!((px[2] - 0.6).abs() < 1e-4, "B={}", px[2]);
+		delete_fbo(fbo);
+		delete_memory_texture(&gl);
+		ctx.destroy_texture(token);
 	}
 
 	/// 同线程可重入 acquire：外层 guard 持有期再 acquire 不死锁，GL

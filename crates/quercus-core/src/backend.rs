@@ -48,6 +48,8 @@ pub mod external;
 
 #[cfg(target_os = "linux")]
 pub use external::DmaBufPlane;
+#[cfg(target_os = "linux")]
+pub use external::GlMemoryExport;
 pub use external::ImportGuard;
 
 /// Backend selection preference (mapped onto wgpu backends).
@@ -237,6 +239,11 @@ struct GpuTexture {
 	/// count))` when this token aliases one slice. `None` = the whole
 	/// (single-layer) texture.
 	layer: Option<(u32, u32)>,
+	/// Linux/Vulkan external memory backing (OpenFX GL zero-copy). The
+	/// texture was allocated with `OPAQUE_FD` exportable memory, so the
+	/// plugin's GL context can import the very same allocation.
+	#[cfg(target_os = "linux")]
+	external: Option<Arc<external::ExternalTexture>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -332,6 +339,11 @@ pub struct GpuContext {
 	/// pipeline). A context that has never touched the GPU can still be
 	/// replaced by the UI's adopted device (`install_shared`).
 	used: AtomicBool,
+	/// Linux/Vulkan OpenFX GL zero-copy: allocate `Rgba32Float` textures
+	/// with exportable `OPAQUE_FD` memory. Disabled by
+	/// `QUERCUS_OFX_GPU_ZEROCOPY=0`; every allocation failure falls back
+	/// to a normal wgpu texture.
+	ofx_zerocopy: bool,
 }
 
 /// The installed display transform: a 3D LUT texture plus its input domain.
@@ -386,6 +398,25 @@ fn shared_slot() -> &'static Mutex<SharedSlot> {
 			ctx: None,
 		})
 	})
+}
+
+/// Whether Linux/Vulkan OpenFX GL zero-copy allocation is requested.
+///
+/// Default on for Linux; `QUERCUS_OFX_GPU_ZEROCOPY=0` / `false` disables
+/// it (the plugin path then keeps the CPU/GL-readback fallback). The
+/// actual external allocation is still best-effort per texture.
+fn zerocopy_requested() -> bool {
+	#[cfg(target_os = "linux")]
+	{
+		!matches!(
+			std::env::var("QUERCUS_OFX_GPU_ZEROCOPY").ok().as_deref(),
+			Some("0") | Some("false") | Some("FALSE") | Some("False")
+		)
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		false
+	}
 }
 
 /// Parse an `QUERCUS_REQUIRE_GPU` value: unset means "skipping is allowed";
@@ -541,6 +572,7 @@ impl GpuContext {
 				yuv_planar: Mutex::new(None),
 				color_luts: Mutex::new(Vec::new()),
 				used: AtomicBool::new(false),
+				ofx_zerocopy: zerocopy_requested(),
 			}));
 		}
 		None
@@ -581,6 +613,7 @@ impl GpuContext {
 			yuv_planar: Mutex::new(None),
 			color_luts: Mutex::new(Vec::new()),
 			used: AtomicBool::new(false),
+			ofx_zerocopy: zerocopy_requested(),
 		})
 	}
 
@@ -588,6 +621,12 @@ impl GpuContext {
 	/// shared its device; presentation is zero-copy on this context).
 	pub fn is_adopted(&self) -> bool {
 		self._adapter.is_none()
+	}
+
+	/// The adapter description, when this context created its own device
+	/// (adopted contexts do not own an adapter).
+	pub fn adapter_name(&self) -> Option<String> {
+		self._adapter.as_ref().map(|a| a.get_info().name)
 	}
 
 	/// True once the context has created a GPU resource (texture or
@@ -602,6 +641,18 @@ impl GpuContext {
 	/// can present each other's textures zero-copy.
 	pub fn device_queue(&self) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
 		(Arc::new(self.device.clone()), Arc::new(self.queue.clone()))
+	}
+
+	/// Wait until the wgpu queue has finished all submitted work. Used as
+	/// the coarse cross-API synchronization boundary for the OpenFX GL
+	/// zero-copy path (the first version does not yet use external
+	/// semaphores).
+	pub fn wait_idle(&self) {
+		// Flush any queued `Queue::write_texture` staging copies first:
+		// they are only submitted with the next `Queue::submit`, and a
+		// bare `poll` does not necessarily submit them.
+		let _ = self.queue.submit(std::iter::empty());
+		let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 	}
 
 	/// The backend actually in use.
@@ -643,6 +694,15 @@ impl GpuContext {
 		if width <= 0 || height <= 0 || depth == 0 {
 			return Err(Error::Invalid);
 		}
+		#[cfg(target_os = "linux")]
+		if self.ofx_zerocopy && depth == 1 && format == wgpu::TextureFormat::Rgba32Float {
+			match self.create_exportable_texture(width, height, format, usage) {
+				Ok(token) => return Ok(token),
+				Err(err) => {
+					log::debug!("exportable Rgba32Float texture unavailable, falling back: {err}");
+				}
+			}
+		}
 		self.used.store(true, Ordering::Release);
 		let size = wgpu::Extent3d {
 			width: width as u32,
@@ -673,6 +733,8 @@ impl GpuContext {
 				format,
 				aspect: wgpu::TextureAspect::All,
 				layer: None,
+				#[cfg(target_os = "linux")]
+				external: None,
 			},
 		);
 		Ok(token)
@@ -3641,17 +3703,12 @@ mod tests {
 			(Some("yes"), true),
 			(Some(""), true),
 		] {
-			assert_eq!(
-				require_gpu_from_value(value),
-				expected,
-				"value {value:?}"
-			);
+			assert_eq!(require_gpu_from_value(value), expected, "value {value:?}");
 		}
 		// The soft-skip arm logs and returns instead of failing.
 		skip_or_fail_gpu_with(false, "a coverage probe");
 		// The hard-fail arm panics when a GPU is required.
-		let panicked =
-			std::panic::catch_unwind(|| skip_or_fail_gpu_with(true, "a coverage probe"));
+		let panicked = std::panic::catch_unwind(|| skip_or_fail_gpu_with(true, "a coverage probe"));
 		assert!(
 			panicked.is_err(),
 			"a required GPU must hard-fail a missing adapter"

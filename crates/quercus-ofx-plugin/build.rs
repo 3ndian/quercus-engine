@@ -65,6 +65,10 @@ fn build_test_plugin() {
 	if cfg!(target_os = "macos") {
 		args.push("-framework".into());
 		args.push("OpenGL".into());
+	} else if cfg!(target_os = "linux") {
+		// The test plugin's GL variant calls glClear; link libGL so the
+		// shared object resolves those symbols when dlopen'd.
+		args.push("-lGL".into());
 	}
 	let status = Command::new(&cc)
 		.args(&args)

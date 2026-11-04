@@ -39,11 +39,11 @@ mod common;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Arc;
 
+use quercus_core::backend::{BackendKind, GpuContextLike};
+use quercus_core::texture::Frame;
 use quercus_core::{PixelFormat, Rational};
 use quercus_ofx_plugin::host::Host;
 use quercus_ofx_plugin::render::{Renderer, Texture};
-use quercus_core::backend::{BackendKind, GpuContextLike};
-use quercus_core::texture::Frame;
 
 const GL_PLUGIN_ID: &str = "org.quercus.test-plugin.gl";
 
@@ -120,8 +120,8 @@ fn scan_and_register() -> bool {
 #[test]
 fn gl_plugin_renders_through_real_gl_path() {
 	common::with_host(|| {
-		if !cfg!(target_os = "macos") {
-			common::skip("GL 桥仅 macOS 实现（Linux/Windows stub）");
+		if cfg!(target_os = "windows") {
+			common::skip("Windows GL 桥仍是 stub");
 			return;
 		}
 		if !common::gpu_available() {
@@ -147,10 +147,12 @@ fn gl_plugin_renders_through_real_gl_path() {
 			.expect("GL 变体实例应可建");
 		let reg = quercus_ofx_plugin::node_factory::register_instance(inst.clone());
 
-		let dst = quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
-			.unwrap();
-		let src = quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
-			.unwrap();
+		let dst =
+			quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
+				.unwrap();
+		let src =
+			quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
+				.unwrap();
 		let renderer: Renderer = Arc::new(FakeGlRenderer);
 		let job = quercus_ofx_plugin::render_driver::RenderJob {
 			time: 0.0,
@@ -195,12 +197,147 @@ fn gl_plugin_renders_through_real_gl_path() {
 		}
 		for m in msg.iter().filter(|m| m.contains("gl-source-index=")) {
 			let v: i32 = m.rsplit('=').next().unwrap().parse().unwrap();
-			assert!(v > 0, "输入 clip 的 OpenGLTextureIndex 应为真实非零 GL 名，got {v}");
+			assert!(
+				v > 0,
+				"输入 clip 的 OpenGLTextureIndex 应为真实非零 GL 名，got {v}"
+			);
 		}
 		for m in msg.iter().filter(|m| m.contains("gl-output-index=")) {
 			let v: i32 = m.rsplit('=').next().unwrap().parse().unwrap();
-			assert!(v > 0, "输出 clip 的 OpenGLTextureIndex 应为真实非零 GL 名，got {v}");
+			assert!(
+				v > 0,
+				"输出 clip 的 OpenGLTextureIndex 应为真实非零 GL 名，got {v}"
+			);
 		}
+	});
+}
+
+/// Linux 真正 GPU 零拷贝：真实 wgpu/Vulkan 上下文 + GPU 输入/输出，
+/// 插件 GL 渲染后输出仍是同一个 GPU token，且渲染期间没有 download。
+#[cfg(target_os = "linux")]
+#[test]
+fn gl_plugin_renders_zero_copy_on_linux() {
+	common::with_host(|| {
+		if !common::gpu_available() {
+			common::skip("零拷贝 GL 测试需 QUERCUS_GPU_TESTS");
+			return;
+		}
+		let Some(ctx) = quercus_core::backend::gpu_or_skip("OFX zero-copy") else {
+			return;
+		};
+		if !ctx.supports_gl_zerocopy() {
+			common::skip("当前 Vulkan 上下文不支持 OPAQUE_FD 导出");
+			return;
+		}
+		if !quercus_ofx_plugin::gl_bridge::gl_available() {
+			common::skip("本机无可用 EGL/GL 上下文");
+			return;
+		}
+		if !scan_and_register() {
+			return;
+		}
+
+		let inst = Host::global()
+			.create_instance(GL_PLUGIN_ID, None)
+			.expect("GL 变体实例应可建");
+		let reg = quercus_ofx_plugin::node_factory::register_instance(inst.clone());
+
+		let (w, h) = (64, 64);
+		let src_token = ctx.create_texture(w, h).expect("src texture");
+		let mut src_frame =
+			quercus_render::eval::generate_frame(Rational::new(0, 1), (w, h), PixelFormat::F32)
+				.expect("source frame");
+		for px in src_frame.data.chunks_exact_mut(16) {
+			px[0..4].copy_from_slice(&0.05f32.to_le_bytes());
+			px[4..8].copy_from_slice(&0.10f32.to_le_bytes());
+			px[8..12].copy_from_slice(&0.15f32.to_le_bytes());
+			px[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+		}
+		ctx.upload(src_token, &src_frame).expect("src upload");
+		let dst_token = ctx.create_texture(w, h).expect("dst texture");
+		let src = Texture::gpu(ctx.clone(), src_token, w, h, PixelFormat::F32);
+		let dst = Texture::gpu(ctx.clone(), dst_token, w, h, PixelFormat::F32);
+		let renderer: Renderer = Arc::new(quercus_ofx_plugin::render::GlKindMarker);
+		let job = quercus_ofx_plugin::render_driver::RenderJob {
+			time: 0.0,
+			dst: dst.clone(),
+			src: Some(src),
+			effect_input_id: Some("Source".into()),
+			inputs: Vec::new(),
+			values: Vec::new(),
+			renderer: Some(renderer),
+			clear_destination: false,
+			interactive: false,
+		};
+
+		let mut captured: Vec<(String, String)> = Vec::new();
+		quercus_ofx_plugin::suites::message::set_handler(
+			Some(capture_msg),
+			&mut captured as *mut _ as *mut c_void,
+		);
+		let before = quercus_core::backend::gpu_transfer_counters();
+		let readbacks_before = quercus_ofx_plugin::gl_bridge::gl_readback_count();
+		let mut out = None;
+		for _ in 0..25 {
+			let (rendered, _rois) =
+				quercus_ofx_plugin::render_driver::render_frame(&inst.value, &job)
+					.expect("zero-copy render_frame");
+			out = Some(rendered);
+		}
+		let out = out.expect("at least one frame");
+		quercus_ofx_plugin::suites::message::set_handler(None, std::ptr::null_mut());
+		let after = quercus_core::backend::gpu_transfer_counters();
+		assert_eq!(
+			quercus_ofx_plugin::gl_bridge::gl_readback_count(),
+			readbacks_before,
+			"zero-copy must not call glReadPixels"
+		);
+		assert_eq!(after.0, before.0, "zero-copy must not upload a CPU frame");
+		assert_eq!(after.1, before.1, "zero-copy must not download a CPU frame");
+		let Texture::Gpu { token, .. } = &out else {
+			panic!("zero-copy output must stay a GPU texture");
+		};
+		assert_eq!(*token, dst_token, "output must be the destination token");
+
+		// The output must be sampleable by the next wgpu graph node (not
+		// just copyable). A GPU blit exercises the RESOURCE transition and
+		// catches the UNINITIALIZED-discard bug.
+		let sampled = ctx.create_texture(w, h).expect("sampled texture");
+		ctx.blit(dst_token, sampled, None)
+			.expect("downstream GPU sample/blit");
+		ctx.wait_idle();
+		let sampled_frame = ctx.download(sampled).expect("download sampled output");
+		let sampled_px: Vec<f32> = sampled_frame.data[0..16]
+			.chunks_exact(4)
+			.map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+			.collect();
+		for (i, v) in [0.1, 0.2, 0.3, 1.0].iter().enumerate() {
+			assert!(
+				(sampled_px[i] - v).abs() < 1e-4,
+				"downstream sample pixel[{i}] = {} expected {v}",
+				sampled_px[i]
+			);
+		}
+		ctx.destroy_texture(sampled);
+
+		// Test-only readback to verify the plugin's GL clear color.
+		let frame = ctx.download(dst_token).expect("download zero-copy output");
+		let px: Vec<f32> = frame.data[0..16]
+			.chunks_exact(4)
+			.map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+			.collect();
+		for (i, v) in [0.1, 0.2, 0.3, 1.0].iter().enumerate() {
+			assert!(
+				(px[i] - v).abs() < 1e-4,
+				"zero-copy pixel[{i}] = {} expected {v}",
+				px[i]
+			);
+		}
+
+		quercus_ofx_plugin::node_factory::unregister_instance(reg);
+		Host::global().shutdown();
+		ctx.destroy_texture(src_token);
+		ctx.destroy_texture(dst_token);
 	});
 }
 
@@ -225,10 +362,12 @@ fn gl_plugin_falls_back_to_cpu_without_gl_renderer() {
 			.expect("GL 变体实例应可建");
 		let reg = quercus_ofx_plugin::node_factory::register_instance(inst.clone());
 
-		let dst = quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
-			.unwrap();
-		let src = quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
-			.unwrap();
+		let dst =
+			quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
+				.unwrap();
+		let src =
+			quercus_render::eval::generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32)
+				.unwrap();
 		let job = quercus_ofx_plugin::render_driver::RenderJob {
 			time: 0.0,
 			dst: Texture::wrap_frame(dst),
