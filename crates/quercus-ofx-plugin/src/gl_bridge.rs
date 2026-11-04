@@ -121,6 +121,21 @@ pub fn gl_available() -> bool {
 	imp::gl_available()
 }
 
+/// Whether the current GL implementation exposes the memory-object
+/// extension needed for zero-copy (Linux `GL_EXT_memory_object_fd`,
+/// Windows `GL_EXT_memory_object_win32`). Useful as a one-line probe on a
+/// target machine before enabling the path.
+pub fn gl_memory_object_available() -> bool {
+	#[cfg(target_os = "macos")]
+	{
+		false
+	}
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
+	{
+		imp::gl_memory_object_available()
+	}
+}
+
 /// Linux: prefer the EGL device whose renderer matches the engine's
 /// Vulkan adapter (multi-GPU machines). Must be called before the GL
 /// context is first created; later calls are ignored.
@@ -128,6 +143,11 @@ pub fn gl_available() -> bool {
 pub fn set_preferred_renderer(name: &str) {
 	imp::set_preferred_renderer(name);
 }
+
+/// Windows: kept for call-site parity. WGL device selection is currently
+/// implicit (the hidden window's display); the probe logs GL_RENDERER.
+#[cfg(target_os = "windows")]
+pub fn set_preferred_renderer(_name: &str) {}
 
 /// 取得进程级 GL 上下文并把本线程置为 current（全局串行）。
 /// 返回的 guard 在 drop 时清 current 并放锁。失败（无 GL / 上下文
@@ -579,6 +599,10 @@ mod imp {
 		context().is_ok()
 	}
 
+	pub fn gl_memory_object_available() -> bool {
+		context().map(|c| c.memory.is_some()).unwrap_or(false)
+	}
+
 	/// GL 错误检查（测试断言用；返回最近错误或 GL_NO_ERROR）。
 	fn check_error(what: &str) -> crate::error::Result<()> {
 		// SAFETY: glGetError 无参数，读取当前上下文的错误状态。
@@ -853,7 +877,7 @@ mod imp {
 /// The GL memory object owns the duplicated fd; deleting the texture and
 /// the memory object releases both. `name` is the real texture name OFX
 /// plugins receive through `kOfxImageEffectPropOpenGLTextureIndex`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Clone)]
 pub struct GlMemoryTexture {
 	/// Real GL texture name.
@@ -873,7 +897,7 @@ pub struct GlMemoryTexture {
 /// Requires the GL context to be current ([`GlGuard`] held). The returned
 /// texture must be destroyed via [`delete_memory_texture`] while a guard is
 /// still held.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn import_memory_texture(
 	export: &quercus_core::backend::GlMemoryExport,
 	width: i32,
@@ -888,7 +912,7 @@ pub fn import_memory_texture(
 /// # Safety
 ///
 /// Requires the GL context to be current.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn delete_memory_texture(texture: &GlMemoryTexture) {
 	imp::delete_memory_texture(texture);
 }
@@ -901,13 +925,13 @@ pub fn gl_finish() {
 		// macOS has no zero-copy GL path yet; the CGL implementation does
 		// not expose glFinish. Nothing to do.
 	}
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	imp::gl_finish();
 }
 
 /// Issue a GL memory barrier covering texture reads/writes.
 pub fn gl_memory_barrier() {
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	imp::gl_memory_barrier();
 }
 
@@ -1271,7 +1295,8 @@ mod imp {
 					if i >= count as usize {
 						break;
 					}
-					let dpy = unsafe { get_platform(EGL_PLATFORM_DEVICE_EXT, dev, std::ptr::null()) };
+					let dpy =
+						unsafe { get_platform(EGL_PLATFORM_DEVICE_EXT, dev, std::ptr::null()) };
 					if dpy.is_null() {
 						continue;
 					}
@@ -1282,7 +1307,8 @@ mod imp {
 					}
 					let vendor = cstr(unsafe { (egl.query_string)(dpy, EGL_VENDOR) });
 					let renderer = cstr(unsafe { query_device_string(dev, EGL_RENDERER_EXT) });
-					let node = cstr(unsafe { query_device_string(dev, EGL_DRM_RENDER_NODE_FILE_EXT) });
+					let node =
+						cstr(unsafe { query_device_string(dev, EGL_DRM_RENDER_NODE_FILE_EXT) });
 					if std::env::var_os("QUERCUS_OFX_GL_TRACE").is_some() {
 						eprintln!("[ofx-gl] egl device {i}: vendor={vendor} renderer={renderer} node={node}");
 					}
@@ -1316,10 +1342,9 @@ mod imp {
 		let mut major = 0i32;
 		let mut minor = 0i32;
 		if unsafe { (egl.initialize)(dpy, &mut major, &mut minor) } != EGL_TRUE {
-			return Err(format!(
-				"eglInitialize(default) failed: 0x{:x}",
-				unsafe { (egl.get_error)() }
-			));
+			return Err(format!("eglInitialize(default) failed: 0x{:x}", unsafe {
+				(egl.get_error)()
+			}));
 		}
 		Ok(dpy)
 	}
@@ -1492,6 +1517,10 @@ mod imp {
 
 	pub fn gl_available() -> bool {
 		context().is_ok()
+	}
+
+	pub fn gl_memory_object_available() -> bool {
+		context().map(|c| c.memory.is_some()).unwrap_or(false)
 	}
 
 	fn check_error(what: &str) -> crate::error::Result<()> {
@@ -1843,10 +1872,808 @@ mod imp {
 	}
 }
 
-/// 非 macOS/Linux：GL 桥 stub（Windows 预留 WGL 的接线点；
+// ---- Windows：WGL + GL_EXT_memory_object_win32 ------------------------
+
+#[cfg(target_os = "windows")]
+mod imp {
+	use super::*;
+	use crate::image::{BitDepth, Components};
+	use crate::instance::OfxRectD;
+	use std::ffi::{c_char, c_void, CStr};
+	use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+	use windows_sys::Win32::Foundation::{CloseHandle, HINSTANCE, HWND};
+	use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC, HDC};
+	use windows_sys::Win32::Graphics::OpenGL::{
+		wglCreateContext, wglDeleteContext, wglGetProcAddress, wglMakeCurrent, ChoosePixelFormat,
+		SetPixelFormat, HGLRC, PFD_DOUBLEBUFFER, PFD_DRAW_TO_WINDOW, PFD_SUPPORT_OPENGL,
+		PFD_TYPE_RGBA, PIXELFORMATDESCRIPTOR,
+	};
+	use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, UnregisterClassW, CS_OWNDC,
+		WNDCLASSW, WS_OVERLAPPEDWINDOW,
+	};
+
+	const GL_TEXTURE_2D: u32 = 0x0DE1;
+	const GL_RGBA: u32 = 0x1908;
+	const GL_UNSIGNED_BYTE: u32 = 0x1401;
+	const GL_FLOAT: u32 = 0x1406;
+	const GL_RGBA32F: u32 = 0x8814;
+	const GL_RGBA8: u32 = 0x8058;
+	const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
+	const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+	const GL_NEAREST: u32 = 0x2600;
+	const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+	const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+	const GL_CLAMP_TO_EDGE: u32 = 0x812F;
+	const GL_FRAMEBUFFER: u32 = 0x8D40;
+	const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+	const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+	const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+	const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+	const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
+	const GL_VERSION: u32 = 0x1F02;
+	const GL_NO_ERROR: u32 = 0;
+	const GL_TEXTURE_FETCH_BARRIER_BIT: u32 = 0x00000008;
+	const GL_SHADER_IMAGE_ACCESS_BARRIER_BIT: u32 = 0x00000020;
+	const GL_HANDLE_TYPE_OPAQUE_WIN32_EXT: u32 = 0x9587;
+
+	const WGL_CONTEXT_MAJOR_VERSION_ARB: i32 = 0x2091;
+	const WGL_CONTEXT_MINOR_VERSION_ARB: i32 = 0x2092;
+	const WGL_CONTEXT_PROFILE_MASK_ARB: i32 = 0x9126;
+	const WGL_CONTEXT_CORE_PROFILE_BIT_ARB: i32 = 0x0000_0001;
+
+	type WglCreateContextAttribsArb = unsafe extern "system" fn(HDC, HGLRC, *const i32) -> HGLRC;
+	type GLGetString = unsafe extern "system" fn(u32) -> *const c_char;
+	type GLGenTextures = unsafe extern "system" fn(i32, *mut u32);
+	type GLDeleteTextures = unsafe extern "system" fn(i32, *const u32);
+	type GLBindTexture = unsafe extern "system" fn(u32, u32);
+	type GLTexParameteri = unsafe extern "system" fn(u32, u32, i32);
+	type GLTexImage2D =
+		unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+	type GLGenFramebuffers = unsafe extern "system" fn(i32, *mut u32);
+	type GLDeleteFramebuffers = unsafe extern "system" fn(i32, *const u32);
+	type GLBindFramebuffer = unsafe extern "system" fn(u32, u32);
+	type GLFramebufferTexture2D = unsafe extern "system" fn(u32, u32, u32, u32, i32);
+	type GLCheckFramebufferStatus = unsafe extern "system" fn(u32) -> u32;
+	type GLViewport = unsafe extern "system" fn(i32, i32, i32, i32);
+	type GLClearColor = unsafe extern "system" fn(f32, f32, f32, f32);
+	type GLClear = unsafe extern "system" fn(u32);
+	type GLReadPixels = unsafe extern "system" fn(i32, i32, i32, i32, u32, u32, *mut c_void);
+	type GLGetError = unsafe extern "system" fn() -> u32;
+	type GLFinish = unsafe extern "system" fn();
+	type GLMemoryBarrier = unsafe extern "system" fn(u32);
+	type GLPixelStorei = unsafe extern "system" fn(u32, i32);
+	type GLCreateMemoryObjects = unsafe extern "system" fn(i32, *mut u32);
+	type GLDeleteMemoryObjects = unsafe extern "system" fn(i32, *const u32);
+	type GLImportMemoryWin32Handle = unsafe extern "system" fn(u32, u64, u32, *mut c_void);
+	type GLTexStorageMem2D = unsafe extern "system" fn(u32, i32, u32, i32, i32, u32, u64);
+
+	struct GlFns {
+		get_string: GLGetString,
+		gen_textures: GLGenTextures,
+		delete_textures: GLDeleteTextures,
+		bind_texture: GLBindTexture,
+		tex_parameter_i: GLTexParameteri,
+		tex_image_2d: GLTexImage2D,
+		gen_framebuffers: GLGenFramebuffers,
+		delete_framebuffers: GLDeleteFramebuffers,
+		bind_framebuffer: GLBindFramebuffer,
+		framebuffer_texture_2d: GLFramebufferTexture2D,
+		check_framebuffer_status: GLCheckFramebufferStatus,
+		viewport: GLViewport,
+		clear_color: GLClearColor,
+		clear: GLClear,
+		read_pixels: GLReadPixels,
+		get_error: GLGetError,
+		finish: GLFinish,
+		memory_barrier: Option<GLMemoryBarrier>,
+		pixel_store_i: GLPixelStorei,
+	}
+
+	impl GlFns {
+		fn load() -> Result<Self, String> {
+			unsafe {
+				Ok(Self {
+					get_string: load_gl(b"glGetString\0")?,
+					gen_textures: load_gl(b"glGenTextures\0")?,
+					delete_textures: load_gl(b"glDeleteTextures\0")?,
+					bind_texture: load_gl(b"glBindTexture\0")?,
+					tex_parameter_i: load_gl(b"glTexParameteri\0")?,
+					tex_image_2d: load_gl(b"glTexImage2D\0")?,
+					gen_framebuffers: load_gl(b"glGenFramebuffers\0")?,
+					delete_framebuffers: load_gl(b"glDeleteFramebuffers\0")?,
+					bind_framebuffer: load_gl(b"glBindFramebuffer\0")?,
+					framebuffer_texture_2d: load_gl(b"glFramebufferTexture2D\0")?,
+					check_framebuffer_status: load_gl(b"glCheckFramebufferStatus\0")?,
+					viewport: load_gl(b"glViewport\0")?,
+					clear_color: load_gl(b"glClearColor\0")?,
+					clear: load_gl(b"glClear\0")?,
+					read_pixels: load_gl(b"glReadPixels\0")?,
+					get_error: load_gl(b"glGetError\0")?,
+					finish: load_gl(b"glFinish\0")?,
+					memory_barrier: load_gl_optional(b"glMemoryBarrier\0"),
+					pixel_store_i: load_gl(b"glPixelStorei\0")?,
+				})
+			}
+		}
+	}
+
+	struct GlMemoryFns {
+		create: GLCreateMemoryObjects,
+		delete: GLDeleteMemoryObjects,
+		import: GLImportMemoryWin32Handle,
+		tex_storage: GLTexStorageMem2D,
+	}
+
+	impl GlMemoryFns {
+		fn load() -> Option<Self> {
+			unsafe {
+				Some(Self {
+					create: load_gl_optional(b"glCreateMemoryObjectsEXT\0")?,
+					delete: load_gl_optional(b"glDeleteMemoryObjectsEXT\0")?,
+					import: load_gl_optional(b"glImportMemoryWin32HandleEXT\0")?,
+					tex_storage: load_gl_optional(b"glTexStorageMem2DEXT\0")?,
+				})
+			}
+		}
+	}
+
+	unsafe fn load_gl<T: Copy>(name: &[u8]) -> Result<T, String> {
+		unsafe { load_gl_optional(name) }.ok_or_else(|| {
+			format!(
+				"missing GL function {}",
+				String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
+			)
+		})
+	}
+
+	unsafe fn load_gl_optional<T: Copy>(name: &[u8]) -> Option<T> {
+		let p = unsafe { wglGetProcAddress(name.as_ptr()) };
+		if let Some(f) = p {
+			return Some(unsafe { std::mem::transmute_copy(&f) });
+		}
+		let module = unsafe { GetModuleHandleW(windows_sys::w!("opengl32.dll")) };
+		if module.is_null() {
+			return None;
+		}
+		let p = unsafe { GetProcAddress(module, name.as_ptr()) };
+		p.map(|f| unsafe { std::mem::transmute_copy(&f) })
+	}
+
+	fn cstr(p: *const c_char) -> String {
+		if p.is_null() {
+			String::new()
+		} else {
+			unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+		}
+	}
+
+	struct GlContext {
+		hwnd: HWND,
+		hdc: HDC,
+		hrc: HGLRC,
+		gl: GlFns,
+		memory: Option<GlMemoryFns>,
+	}
+
+	// SAFETY: the global GL_LOCK serializes every make-current/GL call;
+	// window/context handles are only used by the thread holding the guard.
+	unsafe impl Send for GlContext {}
+	unsafe impl Sync for GlContext {}
+
+	impl GlContext {
+		fn drop_current(&self) {
+			unsafe {
+				wglMakeCurrent(self.hdc, std::ptr::null_mut());
+			}
+		}
+	}
+
+	impl Drop for GlContext {
+		fn drop(&mut self) {
+			unsafe {
+				wglMakeCurrent(self.hdc, std::ptr::null_mut());
+				if !self.hrc.is_null() {
+					wglDeleteContext(self.hrc);
+				}
+				if !self.hdc.is_null() {
+					ReleaseDC(self.hwnd, self.hdc);
+				}
+				if !self.hwnd.is_null() {
+					DestroyWindow(self.hwnd);
+				}
+				UnregisterClassW(windows_sys::w!("QuercusOfxGlWindow"), std::ptr::null_mut());
+			}
+		}
+	}
+
+	static GL_CONTEXT: OnceLock<Result<Arc<GlContext>, String>> = OnceLock::new();
+	static GL_LOCK: Mutex<()> = Mutex::new(());
+
+	fn lock() -> MutexGuard<'static, ()> {
+		GL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+	}
+
+	fn err(msg: &str) -> crate::error::Error {
+		crate::error::Error::Failed(format!("gl_bridge: {msg}"))
+	}
+
+	fn context() -> crate::error::Result<&'static Arc<GlContext>> {
+		match GL_CONTEXT.get_or_init(create_context) {
+			Ok(c) => Ok(c),
+			Err(e) => Err(err(e)),
+		}
+	}
+
+	fn create_context() -> Result<Arc<GlContext>, String> {
+		let hinstance: HINSTANCE = unsafe { GetModuleHandleW(std::ptr::null()) };
+		if hinstance.is_null() {
+			return Err("GetModuleHandleW(NULL) failed".into());
+		}
+		let class_name = windows_sys::w!("QuercusOfxGlWindow");
+		let wc = WNDCLASSW {
+			style: CS_OWNDC,
+			lpfnWndProc: Some(DefWindowProcW),
+			hInstance: hinstance,
+			lpszClassName: class_name,
+			..Default::default()
+		};
+		unsafe {
+			RegisterClassW(&wc);
+		}
+		let hwnd = unsafe {
+			CreateWindowExW(
+				0,
+				class_name,
+				windows_sys::w!("Quercus OFX GL"),
+				WS_OVERLAPPEDWINDOW,
+				0,
+				0,
+				8,
+				8,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				hinstance,
+				std::ptr::null(),
+			)
+		};
+		if hwnd.is_null() {
+			return Err("CreateWindowExW failed".into());
+		}
+		let hdc = unsafe { GetDC(hwnd) };
+		if hdc.is_null() {
+			unsafe { DestroyWindow(hwnd) };
+			return Err("GetDC failed".into());
+		}
+		let mut pfd: PIXELFORMATDESCRIPTOR = unsafe { std::mem::zeroed() };
+		pfd.nSize = std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as u16;
+		pfd.nVersion = 1;
+		pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+		pfd.iPixelType = PFD_TYPE_RGBA;
+		pfd.cColorBits = 32;
+		pfd.cAlphaBits = 8;
+		pfd.cDepthBits = 24;
+		let format = unsafe { ChoosePixelFormat(hdc, &pfd) };
+		if format == 0 {
+			unsafe {
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("ChoosePixelFormat failed".into());
+		}
+		if unsafe { SetPixelFormat(hdc, format, &pfd) } == 0 {
+			unsafe {
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("SetPixelFormat failed".into());
+		}
+
+		let legacy = unsafe { wglCreateContext(hdc) };
+		if legacy.is_null() {
+			unsafe {
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("wglCreateContext failed".into());
+		}
+		if unsafe { wglMakeCurrent(hdc, legacy) } == 0 {
+			unsafe {
+				wglDeleteContext(legacy);
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("wglMakeCurrent(legacy) failed".into());
+		}
+		let create_attribs: Option<WglCreateContextAttribsArb> =
+			unsafe { load_gl_optional(b"wglCreateContextAttribsARB\0") };
+		let Some(create_attribs) = create_attribs else {
+			unsafe {
+				wglMakeCurrent(hdc, std::ptr::null_mut());
+				wglDeleteContext(legacy);
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("wglCreateContextAttribsARB missing".into());
+		};
+		let mut hrc = std::ptr::null_mut();
+		for (major, minor) in [(4, 5), (3, 2)] {
+			let attrs = [
+				WGL_CONTEXT_MAJOR_VERSION_ARB,
+				major,
+				WGL_CONTEXT_MINOR_VERSION_ARB,
+				minor,
+				WGL_CONTEXT_PROFILE_MASK_ARB,
+				WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+				0,
+			];
+			hrc = unsafe { create_attribs(hdc, std::ptr::null_mut(), attrs.as_ptr()) };
+			if !hrc.is_null() {
+				break;
+			}
+		}
+		unsafe { wglDeleteContext(legacy) };
+		if hrc.is_null() {
+			unsafe {
+				wglMakeCurrent(hdc, std::ptr::null_mut());
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("wglCreateContextAttribsARB(core) failed".into());
+		}
+		if unsafe { wglMakeCurrent(hdc, hrc) } == 0 {
+			unsafe {
+				wglDeleteContext(hrc);
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("wglMakeCurrent(core) failed".into());
+		}
+		let gl = GlFns::load()?;
+		let version = cstr(unsafe { (gl.get_string)(GL_VERSION) });
+		if version.is_empty() {
+			unsafe {
+				wglMakeCurrent(hdc, std::ptr::null_mut());
+				wglDeleteContext(hrc);
+				ReleaseDC(hwnd, hdc);
+				DestroyWindow(hwnd);
+			}
+			return Err("glGetString(GL_VERSION) returned null".into());
+		}
+		if std::env::var_os("QUERCUS_OFX_GL_TRACE").is_some() {
+			eprintln!("[ofx-gl] WGL GL_VERSION={version}");
+		}
+		let memory = GlMemoryFns::load();
+		Ok(Arc::new(GlContext {
+			hwnd,
+			hdc,
+			hrc,
+			gl,
+			memory,
+		}))
+	}
+
+	pub struct GuardInner {
+		_lock: Option<MutexGuard<'static, ()>>,
+		_ctx: Arc<GlContext>,
+	}
+
+	thread_local! {
+		static ACQUIRE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+	}
+
+	pub fn is_current() -> bool {
+		ACQUIRE_DEPTH.with(|d| d.get() > 0)
+	}
+
+	pub fn acquire() -> crate::error::Result<GlGuard> {
+		let ctx = context()?.clone();
+		let depth = ACQUIRE_DEPTH.with(|d| d.get());
+		if depth > 0 {
+			ACQUIRE_DEPTH.with(|d| d.set(depth + 1));
+			return Ok(GlGuard {
+				_inner: GuardInner {
+					_lock: None,
+					_ctx: ctx,
+				},
+			});
+		}
+		let guard = lock();
+		if unsafe { wglMakeCurrent(ctx.hdc, ctx.hrc) } == 0 {
+			drop(guard);
+			return Err(err("wglMakeCurrent failed"));
+		}
+		ACQUIRE_DEPTH.with(|d| d.set(1));
+		Ok(GlGuard {
+			_inner: GuardInner {
+				_lock: Some(guard),
+				_ctx: ctx,
+			},
+		})
+	}
+
+	impl Drop for GuardInner {
+		fn drop(&mut self) {
+			let depth = ACQUIRE_DEPTH.with(|d| d.get());
+			if depth <= 1 {
+				ACQUIRE_DEPTH.with(|d| d.set(0));
+				self._ctx.drop_current();
+				drop(self._lock.take());
+			} else {
+				ACQUIRE_DEPTH.with(|d| d.set(depth - 1));
+			}
+		}
+	}
+
+	pub fn gl_available() -> bool {
+		context().is_ok()
+	}
+
+	pub fn gl_memory_object_available() -> bool {
+		context().map(|c| c.memory.is_some()).unwrap_or(false)
+	}
+
+	fn check_error(what: &str) -> crate::error::Result<()> {
+		let ctx = context()?;
+		let e = unsafe { (ctx.gl.get_error)() };
+		if e != GL_NO_ERROR {
+			Err(err(&format!("{what} failed: GL error 0x{e:x}")))
+		} else {
+			Ok(())
+		}
+	}
+
+	fn gl_texture_format(params: &VideoParams) -> crate::error::Result<(u32, u32, usize)> {
+		match params.format {
+			f if f == crate::render::PIXEL_FORMAT_F32 => Ok((GL_RGBA32F, GL_FLOAT, 4)),
+			f if f == crate::render::PIXEL_FORMAT_U8 => Ok((GL_RGBA8, GL_UNSIGNED_BYTE, 1)),
+			f => Err(err(&format!(
+				"target format {f} unsupported for GL (F32/U8 only)"
+			))),
+		}
+	}
+
+	fn set_texture_params(ctx: &GlContext, name: u32) {
+		unsafe {
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST as i32);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST as i32);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
+			(ctx.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+		}
+	}
+
+	pub fn create_output_texture(
+		w: i32,
+		h: i32,
+		params: &VideoParams,
+	) -> crate::error::Result<i32> {
+		let ctx = context()?;
+		if w <= 0 || h <= 0 {
+			return Err(err("invalid texture size"));
+		}
+		let (internal, upload_type, _) = gl_texture_format(params)?;
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut name = 0u32;
+		unsafe {
+			(ctx.gl.gen_textures)(1, &mut name);
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(ctx.gl.tex_image_2d)(
+				GL_TEXTURE_2D,
+				0,
+				internal as i32,
+				w,
+				h,
+				0,
+				GL_RGBA,
+				upload_type,
+				std::ptr::null(),
+			);
+		}
+		set_texture_params(ctx, name);
+		check_error("create_output_texture")?;
+		Ok(name as i32)
+	}
+
+	pub fn create_input_texture(w: i32, h: i32, pixels: &[u8]) -> crate::error::Result<i32> {
+		let ctx = context()?;
+		if w <= 0 || h <= 0 || pixels.len() < (w as usize * h as usize * 16) {
+			return Err(err("invalid input texture size/data"));
+		}
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut name = 0u32;
+		unsafe {
+			(ctx.gl.pixel_store_i)(GL_UNPACK_ALIGNMENT, 1);
+			(ctx.gl.gen_textures)(1, &mut name);
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(ctx.gl.tex_image_2d)(
+				GL_TEXTURE_2D,
+				0,
+				GL_RGBA32F as i32,
+				w,
+				h,
+				0,
+				GL_RGBA,
+				GL_FLOAT,
+				pixels.as_ptr().cast(),
+			);
+		}
+		set_texture_params(ctx, name);
+		check_error("create_input_texture")?;
+		Ok(name as i32)
+	}
+
+	pub fn delete_gl_texture(name: i32) {
+		if name <= 0 {
+			return;
+		}
+		if let Ok(ctx) = context() {
+			let name = name as u32;
+			unsafe {
+				(ctx.gl.delete_textures)(1, &name);
+			}
+		}
+	}
+
+	pub fn import_memory_texture(
+		export: &quercus_core::backend::GlMemoryExport,
+		w: i32,
+		h: i32,
+		params: &VideoParams,
+	) -> crate::error::Result<GlMemoryTexture> {
+		if !is_current() {
+			return Err(err("import_memory_texture requires a current GL context"));
+		}
+		let ctx = context()?;
+		let memory_fns = ctx
+			.memory
+			.as_ref()
+			.ok_or_else(|| err("GL_EXT_memory_object_win32 is not available"))?;
+		let (internal, _, _) = gl_texture_format(params)?;
+		if (w as u32) != export.width() || (h as u32) != export.height() {
+			return Err(err("exported texture size mismatch"));
+		}
+		let handle = export
+			.try_clone_handle()
+			.map_err(|e| err(&format!("duplicate exported handle: {e}")))?;
+		let handle_ptr = handle as *mut c_void;
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut memory = 0u32;
+		unsafe {
+			(memory_fns.create)(1, &mut memory);
+			(memory_fns.import)(
+				memory,
+				export.size(),
+				GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+				handle_ptr,
+			);
+		}
+		let import_err = unsafe { (ctx.gl.get_error)() };
+		if import_err != GL_NO_ERROR {
+			unsafe {
+				CloseHandle(handle_ptr);
+				(memory_fns.delete)(1, &memory);
+			}
+			return Err(err(&format!(
+				"glImportMemoryWin32HandleEXT failed: 0x{import_err:x}"
+			)));
+		}
+		let mut name = 0u32;
+		unsafe {
+			(ctx.gl.gen_textures)(1, &mut name);
+			(ctx.gl.bind_texture)(GL_TEXTURE_2D, name);
+			(memory_fns.tex_storage)(GL_TEXTURE_2D, 1, internal, w, h, memory, 0);
+		}
+		set_texture_params(ctx, name);
+		if let Err(e) = check_error("glTexStorageMem2DEXT") {
+			unsafe {
+				(ctx.gl.delete_textures)(1, &name);
+				(memory_fns.delete)(1, &memory);
+			}
+			return Err(e);
+		}
+		Ok(GlMemoryTexture {
+			name: name as i32,
+			memory,
+			width: w,
+			height: h,
+		})
+	}
+
+	pub fn delete_memory_texture(texture: &GlMemoryTexture) {
+		if texture.name <= 0 {
+			return;
+		}
+		if let Ok(ctx) = context() {
+			let name = texture.name as u32;
+			unsafe {
+				(ctx.gl.delete_textures)(1, &name);
+				if let Some(m) = ctx.memory.as_ref() {
+					(m.delete)(1, &texture.memory);
+				}
+			}
+		}
+	}
+
+	pub fn create_fbo(tex: i32, w: i32, h: i32) -> crate::error::Result<i32> {
+		let ctx = context()?;
+		if tex <= 0 || w <= 0 || h <= 0 {
+			return Err(err("invalid FBO parameters"));
+		}
+		unsafe {
+			let _ = (ctx.gl.get_error)();
+		}
+		let mut fbo = 0u32;
+		unsafe {
+			(ctx.gl.gen_framebuffers)(1, &mut fbo);
+			(ctx.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo);
+			(ctx.gl.framebuffer_texture_2d)(
+				GL_FRAMEBUFFER,
+				GL_COLOR_ATTACHMENT0,
+				GL_TEXTURE_2D,
+				tex as u32,
+				0,
+			);
+		}
+		let status = unsafe { (ctx.gl.check_framebuffer_status)(GL_FRAMEBUFFER) };
+		if status != GL_FRAMEBUFFER_COMPLETE {
+			unsafe {
+				(ctx.gl.delete_framebuffers)(1, &fbo);
+			}
+			return Err(err(&format!("FBO incomplete: 0x{status:x}")));
+		}
+		Ok(fbo as i32)
+	}
+
+	pub fn bind_fbo(fbo: i32) {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo.max(0) as u32);
+			}
+		}
+	}
+
+	pub fn delete_fbo(fbo: i32) {
+		if fbo <= 0 {
+			return;
+		}
+		if let Ok(ctx) = context() {
+			let fbo = fbo as u32;
+			unsafe {
+				(ctx.gl.delete_framebuffers)(1, &fbo);
+			}
+		}
+	}
+
+	pub fn set_viewport(w: i32, h: i32) {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.viewport)(0, 0, w, h);
+			}
+		}
+	}
+
+	pub fn read_pixels_to_image(
+		w: i32,
+		h: i32,
+		params: &VideoParams,
+	) -> crate::error::Result<Arc<crate::image::Image>> {
+		let ctx = context()?;
+		let (_, read_type, bpc) = gl_texture_format(params)?;
+		if w <= 0 || h <= 0 {
+			return Err(err("invalid readback size"));
+		}
+		let count = (w as usize)
+			.saturating_mul(h as usize)
+			.saturating_mul(4)
+			.saturating_mul(bpc);
+		let mut raw = vec![0u8; count];
+		unsafe {
+			(ctx.gl.pixel_store_i)(GL_PACK_ALIGNMENT, 1);
+			(ctx.gl.read_pixels)(0, 0, w, h, GL_RGBA, read_type, raw.as_mut_ptr().cast());
+		}
+		check_error("glReadPixels")?;
+		let mut img = crate::image::Image::allocate(
+			BitDepth::Float,
+			Components::Rgba,
+			OfxRectD {
+				x1: 0.0,
+				y1: 0.0,
+				x2: w as f64,
+				y2: h as f64,
+			},
+		);
+		let dst = img.pixels_mut();
+		let src_row = w as usize * 4 * bpc;
+		let dst_row = w as usize * 16;
+		for y in 0..h as usize {
+			let src_y = h as usize - 1 - y;
+			let src = &raw[src_y * src_row..(src_y + 1) * src_row];
+			let d = &mut dst[y * dst_row..(y + 1) * dst_row];
+			for x in 0..w as usize {
+				let (r, g, b, a) = if bpc == 4 {
+					let p = &src[x * 16..x * 16 + 16];
+					(
+						f32::from_ne_bytes(p[0..4].try_into().unwrap()),
+						f32::from_ne_bytes(p[4..8].try_into().unwrap()),
+						f32::from_ne_bytes(p[8..12].try_into().unwrap()),
+						f32::from_ne_bytes(p[12..16].try_into().unwrap()),
+					)
+				} else {
+					let p = &src[x * 4..x * 4 + 4];
+					(
+						p[0] as f32 / 255.0,
+						p[1] as f32 / 255.0,
+						p[2] as f32 / 255.0,
+						p[3] as f32 / 255.0,
+					)
+				};
+				let o = x * 16;
+				d[o..o + 4].copy_from_slice(&r.to_ne_bytes());
+				d[o + 4..o + 8].copy_from_slice(&g.to_ne_bytes());
+				d[o + 8..o + 12].copy_from_slice(&b.to_ne_bytes());
+				d[o + 12..o + 16].copy_from_slice(&a.to_ne_bytes());
+			}
+		}
+		Ok(Arc::new(img))
+	}
+
+	pub fn gl_clear_color(r: f32, g: f32, b: f32, a: f32) {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.clear_color)(r, g, b, a);
+			}
+		}
+	}
+
+	pub fn gl_clear() {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.clear)(GL_COLOR_BUFFER_BIT);
+			}
+		}
+	}
+
+	pub fn gl_finish() {
+		if let Ok(ctx) = context() {
+			unsafe {
+				(ctx.gl.finish)();
+			}
+		}
+	}
+
+	pub fn gl_memory_barrier() {
+		if let Ok(ctx) = context() {
+			if let Some(barrier) = ctx.gl.memory_barrier {
+				unsafe {
+					barrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+				}
+			}
+		}
+	}
+
+	pub fn gl_version_string() -> Option<String> {
+		let ctx = context().ok()?;
+		let p = unsafe { (ctx.gl.get_string)(GL_VERSION) };
+		if p.is_null() {
+			None
+		} else {
+			Some(cstr(p))
+		}
+	}
+}
+
+/// 非 macOS/Linux/Windows：GL 桥 stub
 
 /// 全部失败/false，use_opengl 决策回退 CPU）。
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod imp {
 	use super::*;
 

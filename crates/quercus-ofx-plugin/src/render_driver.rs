@@ -162,7 +162,7 @@ pub fn render_frame(
 	// Before the GL context is first created, tell the bridge which GPU
 	// the engine is on (multi-GPU Linux). This is a preference only; a
 	// mismatch falls back to the first usable device.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	if let Texture::Gpu { ctx, .. } = &job.dst {
 		if let Some(gpu) = ctx
 			.as_any()
@@ -353,7 +353,7 @@ pub fn render_frame(
 		// Linux/OpenFX 真正 GPU 零拷贝：输入/输出都是同一 Vulkan 分配，
 		// 插件直接写输出 GL 纹理，无 glReadPixels / CPU frame。不可用
 		// 时回退下面的旧 GL 回读路径。
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "windows"))]
 		{
 			match try_render_gl_zerocopy(
 				inst,
@@ -485,7 +485,7 @@ fn render_gl_frame(
 /// lacks exportable memory; the caller then uses the existing GL-readback
 /// or CPU path. `Ok(true)` means the plugin rendered into `job.dst`
 /// in-place.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn try_render_gl_zerocopy(
 	inst: &Instance,
 	job: &RenderJob,

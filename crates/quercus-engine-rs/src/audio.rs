@@ -463,6 +463,12 @@ mod tests {
 	fn levels_and_counters_have_safe_shapes() {
 		let _guard = SERIAL.lock().unwrap();
 		create_instance().expect("create");
+		// Previous tests in this serialized module may have left a stream
+		// running (e.g. push_to_output); stop/clear it so "no playback"
+		// below is a real postcondition, not test-order dependent.
+		let _ = stop_output();
+		let _ = clear_buffered_output();
+		let _ = reset_output_clock();
 
 		// No playback yet: zero channels, but the call itself works.
 		let mut peaks = [1.0f32; 8];

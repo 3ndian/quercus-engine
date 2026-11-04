@@ -74,7 +74,9 @@ static const char *marker_env(const char *name)
  * Linux/Windows 的 GL 桥是 stub，绘制代码随 __APPLE__ 排除）。 */
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
-#elif defined(__linux__)
+#elif defined(_WIN32)
+#include <GL/gl.h>
+#else
 #include <GL/gl.h>
 #endif
 

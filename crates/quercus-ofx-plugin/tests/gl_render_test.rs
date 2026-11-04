@@ -120,10 +120,8 @@ fn scan_and_register() -> bool {
 #[test]
 fn gl_plugin_renders_through_real_gl_path() {
 	common::with_host(|| {
-		if cfg!(target_os = "windows") {
-			common::skip("Windows GL 桥仍是 stub");
-			return;
-		}
+		// Windows 的 WGL 桥现在也是真实实现；无 GL 的机器会在下面
+		// gl_available() 处跳过。
 		if !common::gpu_available() {
 			common::skip("GL 测试需 QUERCUS_GPU_TESTS（本机 GPU 验收；CI 一律跳过）");
 			return;
@@ -212,11 +210,12 @@ fn gl_plugin_renders_through_real_gl_path() {
 	});
 }
 
-/// Linux 真正 GPU 零拷贝：真实 wgpu/Vulkan 上下文 + GPU 输入/输出，
-/// 插件 GL 渲染后输出仍是同一个 GPU token，且渲染期间没有 download。
-#[cfg(target_os = "linux")]
+/// Linux/Windows 真正 GPU 零拷贝：真实 wgpu/Vulkan 上下文 + GPU
+/// 输入/输出，插件 GL 渲染后输出仍是同一个 GPU token，且渲染期间没有
+/// download / glReadPixels。
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
-fn gl_plugin_renders_zero_copy_on_linux() {
+fn gl_plugin_renders_zero_copy() {
 	common::with_host(|| {
 		if !common::gpu_available() {
 			common::skip("零拷贝 GL 测试需 QUERCUS_GPU_TESTS");
@@ -275,6 +274,7 @@ fn gl_plugin_renders_zero_copy_on_linux() {
 			Some(capture_msg),
 			&mut captured as *mut _ as *mut c_void,
 		);
+		#[cfg(target_os = "linux")]
 		let fds_before = std::fs::read_dir("/proc/self/fd")
 			.map(|d| d.count())
 			.unwrap_or(0);
@@ -288,13 +288,16 @@ fn gl_plugin_renders_zero_copy_on_linux() {
 			out = Some(rendered);
 		}
 		let out = out.expect("at least one frame");
-		let fds_after = std::fs::read_dir("/proc/self/fd")
-			.map(|d| d.count())
-			.unwrap_or(0);
-		assert!(
-			fds_after <= fds_before + 4,
-			"zero-copy leaked file descriptors: {fds_before} -> {fds_after}"
-		);
+		#[cfg(target_os = "linux")]
+		{
+			let fds_after = std::fs::read_dir("/proc/self/fd")
+				.map(|d| d.count())
+				.unwrap_or(0);
+			assert!(
+				fds_after <= fds_before + 4,
+				"zero-copy leaked file descriptors: {fds_before} -> {fds_after}"
+			);
+		}
 		quercus_ofx_plugin::suites::message::set_handler(None, std::ptr::null_mut());
 		let after = quercus_core::backend::gpu_transfer_counters();
 		assert_eq!(

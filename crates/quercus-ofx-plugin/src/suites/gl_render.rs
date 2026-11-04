@@ -348,7 +348,7 @@ unsafe extern "C" fn clip_load_texture(
 		// Linux GPU 零拷贝：该 clip 的输入已由渲染驱动从同一块 Vulkan
 		// 显存导入为 GL 纹理；直接返回真实名，跳过 fetch_image 下载
 		// 与 create_input_texture 上传。
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "windows"))]
 		if let Some((gl_name, gl_w, gl_h)) = c.input_gl_texture_info() {
 			let tex = c
 				.input_texture_value()

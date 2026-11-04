@@ -1,6 +1,6 @@
 # OpenFX 真正 GPU 零拷贝：Windows 接入计划
 
-状态：计划稿（未实施）
+状态：代码已实现，待 Windows 真机验收（Vulkan-only，无 DX12）
 前置：Linux/Vulkan + EGL 第一版已落地（`22b2d3d`）
 目标：Windows 上 OFX GL 插件输入/输出同一块 GPU 显存，无
 `glReadPixels`、无 CPU `Frame`、无 upload/download。
@@ -82,6 +82,16 @@ wgpu/Vulkan 设备
    - 即使直通成功，若 GL 扩展缺失，本功能仍然不能用。
 4. **当前 QEMU 无 GPU VM**
    - 只能做 Windows 编译/单测，不能做零拷贝验收。
+
+目标机是 4650G（Renoir/Vega APU）时尤其要先跑探针：
+
+```powershell
+cargo run -p quercus-ofx-plugin --example win_gl_probe
+```
+
+输出 `memory_object=false` 就说明该 Windows 驱动的 OpenGL 没有
+`GL_EXT_memory_object_win32`，本机不能做 Windows 零拷贝；不要继续调
+VFIO/驱动，先换 NVIDIA/AMD 独显或物理机。
 
 iGPU 直通注意事项：
 
@@ -274,6 +284,31 @@ Linux/FreeBSD 注册），因此引擎会自己创建 Vulkan 设备，正好符�
 - 如果以后 Oak 在 Windows 注册 DX12 context，`supports_gl_zerocopy`
   必须为 false，并自动回退；不实现 DX12 导出。
 - Oak 预览器目前仍是 RGBA16F 上传；Windows OFX 边界零拷贝不依赖它。
+
+## 3.1 已实现的代码（待真机验证）
+
+- `quercus-core`：
+  - Windows `GpuContext::create` 请求
+    `VULKAN_EXTERNAL_MEMORY_WIN32`；
+  - `create_exportable_texture` 使用
+    `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT`；
+  - `vkGetMemoryWin32HandleKHR`；
+  - `ExternalTexture` 持有 NT handle，Drop `CloseHandle`；
+  - `GlMemoryExport::try_clone_handle` 用 `DuplicateHandle`。
+- `quercus-ofx-plugin`：
+  - `gl_bridge` Windows `imp`：隐藏窗口 + WGL 4.5/3.2 core；
+  - `GL_EXT_memory_object_win32`：
+    `glCreateMemoryObjectsEXT` +
+    `glImportMemoryWin32HandleEXT` +
+    `glTexStorageMem2DEXT(GL_RGBA32F)`；
+  - `clipLoadTexture`、`try_render_gl_zerocopy`、GPU 输出纹理的
+    cfg 已扩展到 Windows；
+  - 测试插件 Windows DLL 构建（需要 VS developer prompt）。
+- 尚未验证：
+  - AMD 4650G（Renoir/Vega）Windows 驱动是否暴露
+    `GL_EXT_memory_object_win32`；
+  - WGL 是否能选到直通/目标 GPU，而不是 QXL；
+  - 真实 GPU 的 Vulkan/GL 布局一致性与 25 帧稳定性。
 
 ## 4. 明确不做的范围
 

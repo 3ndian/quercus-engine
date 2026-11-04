@@ -2965,6 +2965,7 @@ dependencies = [
  "quercus-render",
  "quercus-undo",
  "thiserror 2.0.21",
+ "windows-sys",
 ]
 
 [[package]]

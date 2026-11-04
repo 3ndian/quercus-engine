@@ -38,14 +38,34 @@ fn main() {
 
 /// 编译最小测试插件为共享库（$OUT_DIR/quercus_test_plugin.{dylib,so}）。
 fn build_test_plugin() {
-	// The test plugin is only used by the Unix test suite; the MSVC
-	// command line differs and the Windows CI job only compiles the
-	// workspace, so skip it there.
-	if cfg!(target_os = "windows") {
-		return;
-	}
 	use std::process::Command;
 	let out = std::env::var("OUT_DIR").expect("OUT_DIR");
+	if cfg!(target_os = "windows") {
+		// MSVC DLL. `cl` is only on PATH inside a Visual Studio developer
+		// prompt; CI without it still builds the workspace, and the GPU
+		// tests skip because the bundle is absent.
+		let cl = std::env::var("CL").unwrap_or_else(|_| "cl".into());
+		let dll = format!("{out}/quercus_test_plugin.dll");
+		let out_arg = format!("/OUT:{dll}");
+		let status = Command::new(&cl)
+			.args([
+				"/nologo",
+				"/LD",
+				"/Iofx",
+				"cbits/quercus_test_plugin.c",
+				"/link",
+			])
+			.arg(out_arg)
+			.args(["opengl32.lib", "user32.lib", "gdi32.lib"])
+			.status();
+		match status {
+			Ok(s) if s.success() => {}
+			_ => println!(
+				"cargo:warning=test plugin DLL not built (run from a VS developer prompt to enable GPU tests)"
+			),
+		}
+		return;
+	}
 	let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
 	let (link_flag, ext) = if cfg!(target_os = "macos") {
 		("-dynamiclib", "dylib")

@@ -48,7 +48,7 @@ pub mod external;
 
 #[cfg(target_os = "linux")]
 pub use external::DmaBufPlane;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use external::GlMemoryExport;
 pub use external::ImportGuard;
 
@@ -242,7 +242,7 @@ struct GpuTexture {
 	/// Linux/Vulkan external memory backing (OpenFX GL zero-copy). The
 	/// texture was allocated with `OPAQUE_FD` exportable memory, so the
 	/// plugin's GL context can import the very same allocation.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	external: Option<Arc<external::ExternalTexture>>,
 }
 
@@ -400,20 +400,22 @@ fn shared_slot() -> &'static Mutex<SharedSlot> {
 	})
 }
 
-/// Whether Linux/Vulkan OpenFX GL zero-copy allocation is requested.
+/// Whether Linux/Windows Vulkan OpenFX GL zero-copy allocation is
+/// requested.
 ///
-/// Default on for Linux; `QUERCUS_OFX_GPU_ZEROCOPY=0` / `false` disables
-/// it (the plugin path then keeps the CPU/GL-readback fallback). The
-/// actual external allocation is still best-effort per texture.
+/// Default on for Linux and Windows; `QUERCUS_OFX_GPU_ZEROCOPY=0` /
+/// `false` disables it (the plugin path then keeps the CPU/GL-readback
+/// fallback). The actual external allocation is still best-effort per
+/// texture.
 fn zerocopy_requested() -> bool {
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	{
 		!matches!(
 			std::env::var("QUERCUS_OFX_GPU_ZEROCOPY").ok().as_deref(),
 			Some("0") | Some("false") | Some("FALSE") | Some("False")
 		)
 	}
-	#[cfg(not(target_os = "linux"))]
+	#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 	{
 		false
 	}
@@ -537,6 +539,17 @@ impl GpuContext {
 				if adapter.features().contains(feature) {
 					required_features |= feature;
 				}
+			}
+			// Windows OpenFX GL zero-copy needs VK_KHR_external_memory_win32
+			// enabled at device creation (OPAQUE_WIN32 export). Request it
+			// only when the adapter advertises it; the runtime gate then
+			// disables zero-copy on drivers without it.
+			#[cfg(target_os = "windows")]
+			if adapter
+				.features()
+				.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32)
+			{
+				required_features |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32;
 			}
 			let (device, queue) =
 				match pollster_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -694,7 +707,7 @@ impl GpuContext {
 		if width <= 0 || height <= 0 || depth == 0 {
 			return Err(Error::Invalid);
 		}
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "windows"))]
 		if self.ofx_zerocopy && depth == 1 && format == wgpu::TextureFormat::Rgba32Float {
 			match self.create_exportable_texture(width, height, format, usage) {
 				Ok(token) => return Ok(token),
@@ -733,7 +746,7 @@ impl GpuContext {
 				format,
 				aspect: wgpu::TextureAspect::All,
 				layer: None,
-				#[cfg(target_os = "linux")]
+				#[cfg(any(target_os = "linux", target_os = "windows"))]
 				external: None,
 			},
 		);

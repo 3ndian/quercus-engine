@@ -28,6 +28,18 @@ thiserror = "2"
 libloading = "0.8"
 libc = "0.2"
 
+# Windows OpenFX GL zero-copy: WGL context + GL_EXT_memory_object_win32.
+# windows-sys provides the hidden-window/GDI/WGL bindings without pulling
+# in the full windows crate.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [features]
 # 历史 feature（原桥测试桩开关）：单库化后 quercusnode/quercusrender/quercusundo
 # 以 path 依赖直连，句柄式调用面改为本地桩（见 src/node.rs /

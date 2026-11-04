@@ -43,7 +43,7 @@ pub struct ClipInstance {
 	input_texture: std::sync::Mutex<Option<crate::render::Texture>>,
 	/// Linux zero-copy: the GL texture imported from the input's
 	/// `OPAQUE_FD` memory (same pixels, no CPU download/upload).
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	input_gl_texture: std::sync::Mutex<Option<crate::gl_bridge::GlMemoryTexture>>,
 	/// 当前输出纹理（C++ `output_textures_` 的 phase 1 单槽；
 	/// [`store_output_image`](Self::store_output_image) 的回写目标；
@@ -111,7 +111,7 @@ impl ClipInstance {
 			props,
 			name,
 			input_texture: std::sync::Mutex::new(None),
-			#[cfg(target_os = "linux")]
+			#[cfg(any(target_os = "linux", target_os = "windows"))]
 			input_gl_texture: std::sync::Mutex::new(None),
 			output_texture: std::sync::Mutex::new(None),
 		}
@@ -177,7 +177,7 @@ impl ClipInstance {
 	/// Linux zero-copy: attach the GL texture imported from this clip's
 	/// GPU input. `clipLoadTexture` then returns its real name without a
 	/// `fetch_image` download.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	pub fn set_input_gl_texture(&self, texture: Option<crate::gl_bridge::GlMemoryTexture>) {
 		*self
 			.input_gl_texture
@@ -186,7 +186,7 @@ impl ClipInstance {
 	}
 
 	/// Linux zero-copy: the attached GL texture's `(name, width, height)`.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "windows"))]
 	pub fn input_gl_texture_info(&self) -> Option<(i32, i32, i32)> {
 		self.input_gl_texture
 			.lock()
