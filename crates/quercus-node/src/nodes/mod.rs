@@ -84,6 +84,7 @@ mod clamp;
 mod grade;
 mod dirblur;
 mod sharpen;
+mod vhsrevrb;
 mod dissolve;
 mod keymix;
 mod premult;
@@ -180,6 +181,7 @@ pub fn register_all() {
 	grade::register(&mut meta);
 	dirblur::register(&mut meta);
 	sharpen::register(&mut meta);
+	vhsrevrb::register(&mut meta);
 	dissolve::register(&mut meta);
 	keymix::register(&mut meta);
 	premult::register(&mut meta);

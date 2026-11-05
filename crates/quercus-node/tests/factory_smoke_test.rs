@@ -87,6 +87,7 @@ const EXPECTED_ORDER: &[&str] = &[
 	"org.olivevideoeditor.Olive.grade",
 	"org.olivevideoeditor.Olive.dirblur",
 	"org.olivevideoeditor.Olive.sharpen",
+	"org.olivevideoeditor.Olive.vhsrevrb",
 	"org.olivevideoeditor.Olive.dissolve",
 	"org.olivevideoeditor.Olive.keymix",
 	"org.olivevideoeditor.Olive.premult",
