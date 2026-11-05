@@ -599,8 +599,11 @@ mod imp {
 		context().is_ok()
 	}
 
+	/// macOS (CGL) has no GL memory-object extension, so zero-copy import is
+	/// never available here. (The CGL `GlContext` has no `memory` field; the
+	/// Linux/Windows version of this probe reads it.)
 	pub fn gl_memory_object_available() -> bool {
-		context().map(|c| c.memory.is_some()).unwrap_or(false)
+		false
 	}
 
 	/// GL 错误检查（测试断言用；返回最近错误或 GL_NO_ERROR）。
