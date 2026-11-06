@@ -394,6 +394,7 @@ pub(crate) fn render_video(
 			montage,
 			adjustments,
 		};
+		let t_render = std::time::Instant::now();
 		let id = manager.tickets.next_id();
 		if let Some((frame, distance, generation)) = playback {
 			manager.tickets.submit_playback_with_id(
@@ -410,6 +411,12 @@ pub(crate) fn render_video(
 				.submit_video_with_id(id, params, Box::new(|_| {}));
 		}
 		manager.tickets.wait(id).map_err(|e| e.to_string())?;
+		eprintln!(
+			"[fork] montage render {}x{} took {:.1} ms",
+			width,
+			height,
+			t_render.elapsed().as_secs_f32() * 1000.0
+		);
 		let result = manager
 			.tickets
 			.result(id)
@@ -467,7 +474,14 @@ pub(crate) fn render_video(
 			pixel_format,
 		);
 	}
+	let t_graph = std::time::Instant::now();
 	let samples = crate::render::render_frame_f32_data(project, viewer, time, width, height)?;
+	eprintln!(
+		"[fork] graph render {}x{} took {:.1} ms",
+		width,
+		height,
+		t_graph.elapsed().as_secs_f32() * 1000.0
+	);
 	let bytes: Vec<u8> = samples
 		.iter()
 		.flat_map(|sample| sample.to_ne_bytes())
