@@ -592,11 +592,18 @@ fn par_pixels_bytes(bytes: &mut [u8], f: impl Fn(&mut [u8]) + Sync) {
 
 fn par_bands<T: Send>(buf: &mut [T], align: usize, f: impl Fn(&mut [T]) + Sync) {
 	let len = buf.len();
-	let bands = if len / align >= (1 << 19) {
+	// [fork] Frames below 2^19 pixels used to run single-threaded, which made
+	// the common half-res/proxy preview sizes the slowest per pixel
+	// (960x540 = 518k px took ~47 ms). Split from ~16k pixels up, giving
+	// each thread at least that many pixels so spawn cost stays negligible.
+	let pixels = len / align;
+	let bands = if pixels >= (1 << 14) {
 		std::thread::available_parallelism()
 			.map(|n| n.get())
 			.unwrap_or(1)
 			.min(8)
+			.min(pixels >> 13)
+			.max(1)
 	} else {
 		1
 	};
