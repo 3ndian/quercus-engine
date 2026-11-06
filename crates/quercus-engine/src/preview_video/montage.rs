@@ -472,6 +472,19 @@ pub(crate) fn sequence_needs_graph_render(
 				continue;
 			}
 			for block_id in &track.blocks {
+				// A visible transition (dissolve, ...) is not part of the montage.
+				if let Some(transition) = project
+					.graph
+					.get(*block_id)
+					.and_then(|entry| entry.behavior.as_any())
+					.and_then(|behavior| {
+						behavior.downcast_ref::<quercus_node::block::TransitionBlockBehavior>()
+					}) {
+					if time >= transition.core.in_() && time < transition.core.out() {
+						return true;
+					}
+					continue;
+				}
 				let Some(clip) = project
 					.graph
 					.get(*block_id)
@@ -482,6 +495,10 @@ pub(crate) fn sequence_needs_graph_render(
 				};
 				if time < clip.core.in_() || time >= clip.core.out() {
 					continue;
+				}
+				// Speed changes and reversed clips are not part of the montage.
+				if (clip.core.speed - 1.0).abs() > 1e-9 || clip.core.reversed {
+					return true;
 				}
 				let is_multicam = project
 					.graph
