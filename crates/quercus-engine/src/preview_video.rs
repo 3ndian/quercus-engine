@@ -12,7 +12,7 @@ use quercus_render::ticket::{TicketPayload, VideoTicketParams};
 
 use crate::handle::NativeMirror;
 use montage::{
-	clamp_render_size, preview_media, single_track_video_montage, video_montage_with_adjustments,
+	clamp_render_size, preview_media, sequence_needs_graph_render, single_track_video_montage, video_montage_with_adjustments,
 };
 
 /// Original producer of an owned frame's bytes.
@@ -335,7 +335,15 @@ pub(crate) fn render_video(
 			(width, height)
 		}
 	};
-	if let Some(manager) = RenderManager::global() {
+	// [fork] Sequences with effects/clips the montage fast path cannot draw
+	// use the full node-graph renderer (the bottom path) instead.
+	let use_graph = track.is_none()
+		&& std::env::var_os("QUERCUS_NO_GRAPH_FALLBACK").is_none()
+		&& {
+		let guard = project.lock().unwrap_or_else(|e| e.into_inner());
+		sequence_needs_graph_render(&guard, viewer, time)
+	};
+	if let Some(manager) = RenderManager::global().filter(|_| !use_graph) {
 		let (montage, adjustments, footage) = {
 			let guard = project.lock().unwrap_or_else(|e| e.into_inner());
 			if let Some(track) = track {

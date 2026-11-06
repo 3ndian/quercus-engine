@@ -427,3 +427,83 @@ pub(crate) fn clamp_render_size(
 		)
 	}
 }
+
+/// [fork] Whether the preview must use the full node-graph renderer for the
+/// frame at `time`. The montage fast path only knows footage clips with the
+/// built-in Opacity effect or OFX plugins; any other built-in effect
+/// (Invert, colour correction, VHS REVRB, ...) or any visible clip that is
+/// not footage (text, solid, ...) would be silently skipped there.
+pub(crate) fn sequence_needs_graph_render(
+	project: &Project,
+	sequence: NodeId,
+	time: Rational,
+) -> bool {
+	const OPACITY: &str = "org.olivevideoeditor.Olive.opacity";
+	let Some(sequence) = project
+		.graph
+		.get(sequence)
+		.and_then(|entry| entry.behavior.as_any())
+		.and_then(|behavior| behavior.downcast_ref::<SequenceBehavior>())
+	else {
+		return false;
+	};
+	for list_id in &sequence.track_lists {
+		let Some(list) = project
+			.graph
+			.get(*list_id)
+			.and_then(|entry| entry.behavior.as_any())
+			.and_then(|behavior| behavior.downcast_ref::<TrackListBehavior>())
+		else {
+			continue;
+		};
+		if list.kind != TrackType::Video {
+			continue;
+		}
+		for track_id in &list.tracks {
+			let Some(track) = project
+				.graph
+				.get(*track_id)
+				.and_then(|entry| entry.behavior.as_any())
+				.and_then(|behavior| behavior.downcast_ref::<TrackBehavior>())
+			else {
+				continue;
+			};
+			if track.muted {
+				continue;
+			}
+			for block_id in &track.blocks {
+				let Some(clip) = project
+					.graph
+					.get(*block_id)
+					.and_then(|entry| entry.behavior.as_any())
+					.and_then(|behavior| behavior.downcast_ref::<ClipBlockBehavior>())
+				else {
+					continue;
+				};
+				if time < clip.core.in_() || time >= clip.core.out() {
+					continue;
+				}
+				let is_multicam = project
+					.graph
+					.connected_output(*block_id, clip_input::TEXTURE_INPUT, -1)
+					.and_then(|source| project.graph.get(source))
+					.is_some_and(|entry| {
+						entry.behavior.type_id() == "org.olivevideoeditor.Olive.multicam"
+					});
+				if !is_multicam
+					&& ops::find_input_footage(&project.graph, *block_id).is_none()
+				{
+					return true;
+				}
+				if clip_effects(project, *block_id, time).iter().any(|effect| {
+					effect.enabled
+						&& effect.type_id.starts_with("org.olivevideoeditor.Olive.")
+						&& effect.type_id != OPACITY
+				}) {
+					return true;
+				}
+			}
+		}
+	}
+	false
+}
